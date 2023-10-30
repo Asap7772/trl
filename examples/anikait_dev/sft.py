@@ -7,7 +7,7 @@ from absl import app, flags
 print('Done with imports')
 
 FLAGS = flags.FLAGS
-flags.DEFINE_string('output_dir', 'sft_output', 'the output directory')
+flags.DEFINE_string('output_dir', None, 'the output directory')
 flags.DEFINE_integer('batch_size', 4, 'the batch size')
 flags.DEFINE_float('learning_rate', 8e-6, 'the learning rate')
 flags.DEFINE_float('weight_decay', 0, 'the weight decay')
@@ -29,7 +29,6 @@ def main(_):
     model = AutoModelForCausalLM.from_pretrained("EleutherAI/pythia-1.4b")
     tokenizer = AutoTokenizer.from_pretrained("EleutherAI/pythia-1.4b")
     tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.add_special_tokens({"prompt_token": PROMPT_TOKEN, "assistant_token": ASSISTANT_TOKEN})
     eos = tokenizer.eos_token
 
     def formatting_prompts_func(example):
@@ -46,10 +45,11 @@ def main(_):
     response_template = ASSISTANT_TOKEN
     collator = DataCollatorForCompletionOnlyLM(response_template, tokenizer=tokenizer)
 
+    extra_kwargs = {}
+    if FLAGS.output_dir is not None:
+        extra_kwargs['output_dir'] = FLAGS.output_dir
+
     training_args = TrainingArguments(
-        output_dir=FLAGS.output_dir,
-        evaluation_strategy="epoch",
-        save_strategy="epoch",
         do_predict=True,
         learning_rate=FLAGS.learning_rate,
         weight_decay=FLAGS.weight_decay,
@@ -64,6 +64,7 @@ def main(_):
         per_device_train_batch_size=FLAGS.batch_size,
         per_device_eval_batch_size=FLAGS.batch_size,
         num_train_epochs=FLAGS.num_train_epochs,
+        **extra_kwargs
     )
 
     trainer = SFTTrainer(
