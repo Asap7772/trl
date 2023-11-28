@@ -109,6 +109,7 @@ class AutoModelForCausalLMWithValueHead(PreTrainedModelWrapper):
         self.v_head = ValueHead(self.pretrained_model.config, **v_head_kwargs)
 
         self._init_weights(**v_head_kwargs)
+        self.is_peft_model = False
 
     def _init_weights(self, **kwargs):
         r"""

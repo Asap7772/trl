@@ -20,6 +20,8 @@ from .trainer import (
     RewardConfig,
     RewardTrainer,
     SFTTrainer,
+    ReweightedBCConfig,
+    ReweightedBCTrainer
 )
 
 

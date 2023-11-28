@@ -1,7 +1,7 @@
 from datasets import load_dataset
 from trl import PPOConfig
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, AutoModelForCausalLM
-from trl import AutoModelForCausalLMWithValueHead, PPOConfig, PPOTrainer
+from trl import AutoModelForCausalLMWithValueHead, ReweightedBCConfig, ReweightedBCTrainer
 from transformers import pipeline
 import torch
 from absl import flags, app
@@ -41,7 +41,7 @@ def main(_):
 
     unique_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S.%f") + '-' + str(np.random.randint(100000))
     wandb_output_dir = tempfile.mkdtemp()
-    config = PPOConfig(
+    config = ReweightedBCConfig(
         model_name=FLAGS.pretrained_dir,
         learning_rate=FLAGS.learning_rate,
         reward_model=FLAGS.reward_model,
@@ -91,9 +91,7 @@ def main(_):
     print('Sample Train prompt:', dataset[0]['query'])
     print('Sample Eval prompt:', eval_dataset[0]['query'])
 
-    from trl import PPOTrainer
-
-    ppo_trainer = PPOTrainer(
+    rbc_trainer = ReweightedBCTrainer(
         model=model,
         config=config,
         dataset=dataset,
@@ -112,7 +110,7 @@ def main(_):
     
     reward_model = AutoModelForSequenceClassification.from_pretrained(FLAGS.reward_model)
     reward_tokenizer = AutoTokenizer.from_pretrained(FLAGS.reward_model)
-    reward_model = ppo_trainer.accelerator.prepare_model(reward_model)
+    reward_model = rbc_trainer.accelerator.prepare_model(reward_model)
     reward_model.eval()
 
     print("Loaded reward model")
@@ -120,7 +118,7 @@ def main(_):
     def get_pred_reward(text, max_len=512):
         with torch.no_grad():
             encoded_input = reward_tokenizer(text, padding=True, truncation=True, max_length=max_len, return_tensors='pt')
-            encoded_input = accelerate.utils.send_to_device(encoded_input, ppo_trainer.accelerator.device)
+            encoded_input = accelerate.utils.send_to_device(encoded_input, rbc_trainer.accelerator.device)
             output = reward_model(**encoded_input)
             logits = output.logits.squeeze()
         return logits
@@ -130,27 +128,28 @@ def main(_):
             checkpoint_dir = os.path.join(output_dir, checkpoint_dir)
             os.makedirs(checkpoint_dir, exist_ok=True)
 
-        if ppo_trainer.accelerator.is_main_process:
-            ppo_trainer.accelerator.unwrap_model(model).save_pretrained(
+        if rbc_trainer.accelerator.is_main_process:
+            rbc_trainer.accelerator.unwrap_model(model).save_pretrained(
                 checkpoint_dir,
-                save_function=ppo_trainer.accelerator.save,
-                is_main_process=ppo_trainer.accelerator.is_main_process,
-                state_dict=ppo_trainer.accelerator.get_state_dict(model),
+                save_function=rbc_trainer.accelerator.save,
+                is_main_process=rbc_trainer.accelerator.is_main_process,
+                state_dict=rbc_trainer.accelerator.get_state_dict(model),
             )
-            if ppo_trainer.accelerator.is_main_process:
+            if rbc_trainer.accelerator.is_main_process:
                 tokenizer.save_pretrained(checkpoint_dir)
-            ppo_trainer.accelerator.print(f"Checkpointing Epoch {epoch_num} -> {checkpoint_dir}")
+            rbc_trainer.accelerator.print(f"Checkpointing Epoch {epoch_num} -> {checkpoint_dir}")
  
     from tqdm import tqdm
 
     last_epoch = -1
-    for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
+    # TODO (anikait): setup batch mixing with preference dataset
+    for epoch, batch in tqdm(enumerate(rbc_trainer.dataloader)):
         #### Construct query tensors
         query_tensors = tokenizer(batch["query"], padding=True, truncation=True, max_length=128, return_tensors='pt')
-        query_tensors = accelerate.utils.send_to_device(query_tensors, ppo_trainer.accelerator.device)
+        query_tensors = accelerate.utils.send_to_device(query_tensors, rbc_trainer.accelerator.device)
         
         #### Get generations from SFTModel (including prompt)
-        generation_tokens = ppo_trainer.accelerator.unwrap_model(ppo_trainer.model).generate(**query_tensors, **generation_kwargs)
+        generation_tokens = rbc_trainer.accelerator.unwrap_model(rbc_trainer.model).generate(**query_tensors, **generation_kwargs)
         texts = tokenizer.batch_decode(generation_tokens, skip_special_tokens=True)
         
         #### Update batch with response
@@ -167,8 +166,8 @@ def main(_):
         query_tensors = [query_tensors[i] for i in range(0, len(query_tensors))]
 
         #### Run PPO step
-        stats = ppo_trainer.step(query_tensors, response_tensors, rewards)
-        ppo_trainer.log_stats(stats, batch, rewards)
+        stats = rbc_trainer.step(query_tensors, response_tensors, rewards)
+        rbc_trainer.log_stats(stats, batch, rewards)
         
         if epoch > 0 and epoch > last_epoch:
             save_model(model_name + f"_epoch_{epoch}", epoch)

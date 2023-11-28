@@ -53,7 +53,7 @@ from ..core import (
 )
 from ..import_utils import is_torch_greater_2_0
 from ..models import SUPPORTED_ARCHITECTURES, PreTrainedModelWrapper, create_reference_model
-from . import AdaptiveKLController, BaseTrainer, FixedKLController, PPOConfig, RunningMoments
+from . import AdaptiveKLController, BaseTrainer, FixedKLController, ReweightedBCConfig, RunningMoments
 
 
 if is_deepspeed_available():
@@ -104,14 +104,14 @@ outputs = model(**inputs, labels=inputs["input_ids"])
 """
 
 
-class PPOTrainer(BaseTrainer):
+class ReweightedBCTrainer(BaseTrainer):
     """
-    The PPOTrainer uses Proximal Policy Optimization to optimise language models.
+    The ReweightedBCTrainer uses a weighted/filtered BC method to optimise language models.
     Note, this trainer is heavily inspired by the original OpenAI learning to summarize work here:
     https://github.com/openai/summarize-from-feedback
 
     Attributes:
-        **config** (`PPOConfig`) -- Configuration object for PPOTrainer. Check the documentation of `PPOConfig` for more
+        **config** (`ReweightedBCConfig`) -- Configuration object for PPOTrainer. Check the documentation of `ReweightedBCConfig` for more
             details.
         **model** (`PreTrainedModelWrapper`) -- Model to be optimized, Hugging Face transformer model with a value head.
             Check the documentation of `PreTrainedModelWrapper` for more details.
@@ -138,7 +138,7 @@ class PPOTrainer(BaseTrainer):
 
     def __init__(
         self,
-        config: PPOConfig = None,
+        config: ReweightedBCConfig = None,
         model: PreTrainedModelWrapper = None,
         ref_model: Optional[PreTrainedModelWrapper] = None,
         tokenizer: PreTrainedTokenizerBase = None,
@@ -149,11 +149,11 @@ class PPOTrainer(BaseTrainer):
         lr_scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
     ):
         """
-        Initialize PPOTrainer.
+        Initialize ReweightedBCTrainer.
 
         Args:
-            config (`PPOConfig`):
-                Configuration object for PPOTrainer. Check the documentation of `PPOConfig` for more details.
+            config (`ReweightedBCConfig`):
+                Configuration object for ReweightedBCTrainer. Check the documentation of `ReweightedBCConfig` for more details.
             model (`PreTrainedModelWrapper`):
                 Hugging Face transformer model with a value head.
             ref_model (`PreTrainedModelWrapper`):
@@ -180,8 +180,8 @@ class PPOTrainer(BaseTrainer):
         set_seed(config.seed)
 
         # Step 0: check positional arguments validity
-        if not isinstance(config, PPOConfig):
-            raise ValueError(f"config must be a PPOConfig, got {type(config)}")
+        if not isinstance(config, ReweightedBCConfig):
+            raise ValueError(f"config must be a ReweightedBCConfig, got {type(config)}")
         if not isinstance(tokenizer, (PreTrainedTokenizerBase)):
             raise ValueError(
                 f"tokenizer must be a PreTrainedTokenizerBase like a PreTrainedTokenizer or a PreTrainedTokenizerFast, got {type(tokenizer)}"
@@ -585,7 +585,7 @@ class PPOTrainer(BaseTrainer):
         response_masks: Optional[List[torch.LongTensor]] = None,
     ):
         """
-        Run a PPO optimisation step given a list of queries, model responses, and rewards.
+        Run a Reweighted BC optimisation step given a list of queries, model responses, and rewards.
 
         Args:
             queries (List[`torch.LongTensor`]):
@@ -670,7 +670,7 @@ class PPOTrainer(BaseTrainer):
         full_kl_penalty = self.config.kl_penalty == "full"
 
         with torch.no_grad():
-            all_logprobs, logits_or_none, values, masks = self.batched_forward_pass(
+            all_logprobs, logits_or_none, masks = self.batched_forward_pass(
                 self.model,
                 queries,
                 responses,
@@ -684,7 +684,7 @@ class PPOTrainer(BaseTrainer):
                 "disable_adapter",
             ):
                 with self.accelerator.unwrap_model(self.model).pretrained_model.disable_adapter():
-                    ref_logprobs, ref_logits_or_none, _, _ = self.batched_forward_pass(
+                    ref_logprobs, ref_logits_or_none, _ = self.batched_forward_pass(
                         self.model, queries, responses, model_inputs, return_logits=full_kl_penalty
                     )
             elif self.is_peft_model and not hasattr(self.model.pretrained_model, "disable_adapter"):
@@ -693,38 +693,20 @@ class PPOTrainer(BaseTrainer):
                 )
 
             else:
-                ref_logprobs, ref_logits_or_none, _, _ = self.batched_forward_pass(
+                ref_logprobs, ref_logits_or_none, _ = self.batched_forward_pass(
                     self.ref_model, queries, responses, model_inputs, return_logits=full_kl_penalty
                 )
 
-        timing["time/ppo/forward_pass"] = time.time() - t
-
-        with torch.no_grad():
-            t = time.time()
-            if full_kl_penalty:
-                active_full_logprobs = logprobs_from_logits(logits_or_none, None, gather=False)
-                ref_full_logprobs = logprobs_from_logits(ref_logits_or_none, None, gather=False)
-
-                rewards, non_score_reward = self.compute_rewards(
-                    scores, active_full_logprobs, ref_full_logprobs, masks
-                )
-            else:
-                rewards, non_score_reward = self.compute_rewards(scores, all_logprobs, ref_logprobs, masks)
-            timing["time/ppo/compute_rewards"] = time.time() - t
-
-            t = time.time()
-            values, advantages, returns = self.compute_advantages(values, rewards, masks)
-            timing["time/ppo/compute_advantages"] = time.time() - t
+        timing["time/rbc/forward_pass"] = time.time() - t
 
         # upcast to float32 to avoid dataset issues
+        assert scores.shape == (all_logprobs.shape[0],)
         batch_dict = {
             "queries": queries,
             "responses": responses,
             "logprobs": all_logprobs.to(torch.float32),
-            "values": values.to(torch.float32),
             "masks": masks,
-            "advantages": advantages,
-            "returns": returns,
+            "scores": scores.to(torch.float32),
         }
         batch_dict.update(model_inputs)
 
@@ -744,20 +726,18 @@ class PPOTrainer(BaseTrainer):
                     mini_batch_inds = backward_batch_inds[mini_batch_start:mini_batch_end]
                     mini_batch_dict = {
                         "logprobs": batch_dict["logprobs"][mini_batch_inds],
-                        "values": batch_dict["values"][mini_batch_inds],
                         "masks": batch_dict["masks"][mini_batch_inds],
+                        "scores": batch_dict["scores"][mini_batch_inds],
                         # hacks: the queries and responses are ragged.
                         "queries": [batch_dict["queries"][i] for i in mini_batch_inds],
                         "responses": [batch_dict["responses"][i] for i in mini_batch_inds],
-                        "advantages": batch_dict["advantages"][mini_batch_inds],
-                        "returns": batch_dict["returns"][mini_batch_inds],
                     }
                     for k in model_inputs_names:
                         mini_batch_dict[k] = batch_dict[k][mini_batch_inds]
                     with self.accelerator.accumulate(self.model):
                         model_inputs = {k: mini_batch_dict[k] for k in model_inputs_names}
 
-                        logprobs, logits, vpreds, _ = self.batched_forward_pass(
+                        logprobs, logits, _ = self.batched_forward_pass(
                             self.model,
                             mini_batch_dict["queries"],
                             mini_batch_dict["responses"],
@@ -766,13 +746,10 @@ class PPOTrainer(BaseTrainer):
                         )
                         train_stats = self.train_minibatch(
                             mini_batch_dict["logprobs"],
-                            mini_batch_dict["values"],
                             logprobs,
                             logits,
-                            vpreds,
                             mini_batch_dict["masks"],
-                            mini_batch_dict["advantages"],
-                            mini_batch_dict["returns"],
+                            mini_batch_dict["scores"],
                         )
                         all_stats.append(train_stats)
 
@@ -783,21 +760,16 @@ class PPOTrainer(BaseTrainer):
                 if early_stop:
                     break
 
-        timing["time/ppo/optimize_step"] = time.time() - t
+        timing["time/rbc/optimize_step"] = time.time() - t
 
         t = time.time()
         train_stats = stack_dicts(all_stats)
 
-        # reshape advantages/ratios such that they are not averaged.
-        train_stats["policy/advantages"] = torch.flatten(train_stats["policy/advantages"]).unsqueeze(0)
-        train_stats["policy/advantages"] = torch.nan_to_num(train_stats["policy/advantages"], WANDB_PADDING)
-        train_stats["policy/ratio"] = torch.flatten(train_stats["policy/ratio"]).unsqueeze(0)
 
         stats = self.record_step_stats(
             scores=scores,
             logprobs=all_logprobs,
             ref_logprobs=ref_logprobs,
-            non_score_reward=non_score_reward,
             train_stats=train_stats,
             kl_coef=self.kl_ctl.value,
             masks=masks,
@@ -808,8 +780,8 @@ class PPOTrainer(BaseTrainer):
         if self.is_distributed:
             stats = self.gather_stats(stats)
         stats = stats_to_np(stats)
-        timing["time/ppo/calc_stats"] = time.time() - t
-        stats["ppo/learning_rate"] = self.optimizer.param_groups[0]["lr"]
+        timing["time/rbc/calc_stats"] = time.time() - t
+        stats["rbc/learning_rate"] = self.optimizer.param_groups[0]["lr"]
 
         # Update the KL control - multiply the batch_size by the number of processes
         self.kl_ctl.update(
@@ -818,7 +790,7 @@ class PPOTrainer(BaseTrainer):
         )
 
         # Log the total ppo time
-        timing["time/ppo/total"] = time.time() - t0
+        timing["time/rbc/total"] = time.time() - t0
         stats.update(timing)
 
         # post-process stats for tensorboard and other loggers
@@ -935,14 +907,13 @@ class PPOTrainer(BaseTrainer):
                     shape (`batch_size`, `response_length`)
                 - all_ref_logprobs (`torch.FloatTensor`): Log probabilities of the responses,
                     shape (`batch_size`, `response_length`)
-                - all_values (`torch.FloatTensor`): Values of the responses, shape (`batch_size`, `response_length`)
+                - all_masks (`torch.FloatTensor`): Masks of the responses, shape (`batch_size`, `response_length`)
         """
         bs = len(queries)
         fbs = self.config.mini_batch_size
         all_logprobs = []
         all_logits = []
         all_masks = []
-        all_values = []
 
         model.eval()
 
@@ -952,7 +923,7 @@ class PPOTrainer(BaseTrainer):
             response_batch = responses[i * fbs : (i + 1) * fbs]
             if response_masks is not None:
                 response_masks_batch = response_masks[i * fbs : (i + 1) * fbs]
-            logits, _, values = model(**input_kwargs)
+            logits, _, _ = model(**input_kwargs)
 
             if self.is_encoder_decoder:
                 input_ids = input_kwargs["decoder_input_ids"]
@@ -989,14 +960,12 @@ class PPOTrainer(BaseTrainer):
                 all_logits.append(logits)
             else:
                 del logits
-            all_values.append(values)
             all_logprobs.append(logprobs)
             all_masks.append(masks)
 
         return (
             torch.cat(all_logprobs),
             torch.cat(all_logits)[:, :-1] if return_logits else None,
-            torch.cat(all_values)[:, :-1],
             torch.cat(all_masks)[:, :-1],
         )
 
@@ -1004,38 +973,21 @@ class PPOTrainer(BaseTrainer):
     def train_minibatch(
         self,
         old_logprobs: torch.FloatTensor,
-        values: torch.FloatTensor,
         logprobs: torch.FloatTensor,
         logits: torch.FloatTensor,
-        vpreds: torch.FloatTensor,
         mask: torch.LongTensor,
-        advantages: torch.FloatTensor,
-        returns: torch.FloatTensor,
+        scores: torch.FloatTensor,
     ):
         """
-        Train one PPO minibatch
-
-        Args:
-            logprobs (`torch.FloatTensor`):
-                Log probabilities of the model, shape [batch_size, response_length]
-            values (`torch.FloatTensor`):
-                Values of the value head, shape [batch_size, response_length]
-            query (`torch.LongTensor`):
-                Encoded queries, shape [batch_size, query_length]
-            response (`torch.LongTensor`):
-                Encoded responses, shape [batch_size, response_length]
-            model_input (`torch.LongTensor`):
-                Concatenated queries and responses, shape [batch_size, query_length+response_length]
+        Train one reward weighted minibatch
 
         Returns:
             train_stats (dict[str, `torch.Tensor`]):
                 Dictionary of training statistics
         """
         self.model.train()
-        loss_p, loss_v, train_stats = self.loss(
-            old_logprobs, values, logits, vpreds, logprobs, mask, advantages, returns
-        )
-        loss = loss_p + loss_v
+        breakpoint()
+        loss, train_stats = self.loss(old_logprobs, logits, logprobs, mask, scores)
         self.accelerator.backward(loss)
         if self.config.max_grad_norm is not None:
             if self.accelerator.sync_gradients:
@@ -1045,38 +997,6 @@ class PPOTrainer(BaseTrainer):
         # see https://huggingface.co/docs/accelerate/usage_guides/gradient_accumulation#the-finished-code
         self.optimizer.zero_grad()
         return train_stats
-
-    def compute_rewards(
-        self,
-        scores: torch.FloatTensor,
-        logprobs: torch.FloatTensor,
-        ref_logprobs: torch.FloatTensor,
-        masks: torch.LongTensor,
-    ):
-        """
-        Compute per token rewards from scores and KL-penalty.
-
-        Args:
-            scores (`torch.FloatTensor`):
-                Scores from the reward model, shape (`batch_size`)
-            logprobs (`torch.FloatTensor`):
-                Log probabilities of the model, shape (`batch_size`, `response_length`)
-            ref_logprobs (`torch.FloatTensor`):
-                Log probabilities of the reference model, shape (`batch_size`, `response_length`)
-        """
-        rewards, non_score_rewards = [], []
-        for score, logprob, ref_logprob, mask in zip(scores, logprobs, ref_logprobs, masks):
-            # compute KL penalty (from difference in logprobs)
-            kl = self._kl_penalty(logprob, ref_logprob)
-            non_score_reward = -self.kl_ctl.value * kl
-            non_score_rewards.append(non_score_reward)
-            reward = non_score_reward.clone()
-            last_non_masked_index = mask.nonzero()[-1]
-
-            # reward is preference model score + KL penalty
-            reward[last_non_masked_index] += score
-            rewards.append(reward)
-        return torch.stack(rewards), torch.stack(non_score_rewards)
 
     def _kl_penalty(self, logprob: torch.FloatTensor, ref_logprob: torch.FloatTensor) -> torch.FloatTensor:
         if self.config.kl_penalty == "kl":
@@ -1094,44 +1014,13 @@ class PPOTrainer(BaseTrainer):
 
         raise NotImplementedError
 
-    def compute_advantages(
-        self,
-        values: torch.FloatTensor,
-        rewards: torch.FloatTensor,
-        mask: torch.FloatTensor,
-    ):
-        lastgaelam = 0
-        advantages_reversed = []
-        gen_len = rewards.shape[-1]
-
-        values = values * mask
-        rewards = rewards * mask
-
-        if self.config.whiten_rewards:
-            rewards = masked_whiten(rewards, mask, shift_mean=False)
-
-        for t in reversed(range(gen_len)):
-            nextvalues = values[:, t + 1] if t < gen_len - 1 else 0.0
-            delta = rewards[:, t] + self.config.gamma * nextvalues - values[:, t]
-            lastgaelam = delta + self.config.gamma * self.config.lam * lastgaelam
-            advantages_reversed.append(lastgaelam)
-        advantages = torch.stack(advantages_reversed[::-1]).transpose(0, 1)
-
-        returns = advantages + values
-        advantages = masked_whiten(advantages, mask)
-        advantages = advantages.detach()
-        return values, advantages, returns
-
     def loss(
         self,
         old_logprobs: torch.FloatTensor,
-        values: torch.FloatTensor,
         logits: torch.FloatTensor,
-        vpreds: torch.FloatTensor,
         logprobs: torch.FloatTensor,
         mask: torch.LongTensor,
-        advantages: torch.FloatTensor,
-        returns: torch.FloatTensor,
+        scores: torch.FloatTensor,
     ):
         """
         Calculate policy and value losses.
@@ -1139,77 +1028,93 @@ class PPOTrainer(BaseTrainer):
         Args:
             old_logprobs (`torch.FloatTensor`):
                 Log probabilities of the model, shape (`batch_size`, `response_length`)
-            values (`torch.FloatTensor`):
-                Values of the value head, shape (`batch_size`, `response_length`)
-            rewards (`torch.FloatTensor`):
-                Rewards from the reward model, shape (`batch_size`, `response_length`)
             logits (`torch.FloatTensor`):
                 Logits of the model, shape (`batch_size`, `response_length`, `vocab_size`)
-            v_pred (`torch.FloatTensor`):
-                Values of the value head, shape (`batch_size`, `response_length`)
             logprobs (`torch.FloatTensor`):
                 Log probabilities of the model, shape (`batch_size`, `response_length`)
+            mask (`torch.LongTensor`):
+                Mask of the responses, shape (`batch_size`, `response_length`)
+            scores (`torch.FloatTensor`):
+                Scores from the reward model, shape (`batch_size`)
         """
+        
+        unweighted_nll_loss = masked_mean(-logprobs, mask)
+        
+        batch_mask=None
+        if self.config.filter_or_reweight == "filter":
+            # filter out bad responses
+            if self.config.filter_type == "topk":
+                # filter out the top k responses
+                topk = self.config.filter_value
+                topk_scores, _ = torch.topk(scores, topk, largest=True, sorted=True)
+                baseline_score = topk_scores[-1]
+                score_mask = scores >= baseline_score
+                score_mask_repeat = score_mask.unsqueeze(-1).repeat(1, mask.shape[-1])
+                assert score_mask_repeat.shape == mask.shape
+                updated_mask = mask * score_mask_repeat
+            elif self.config.filter_type == "threshold":
+                # filter out responses with scores below a threshold
+                threshold = self.config.filter_value
+                score_mask = scores >= threshold
+                score_mask_repeat = score_mask.unsqueeze(-1).repeat(1, mask.shape[-1])
+                assert score_mask_repeat.shape == mask.shape
+                updated_mask = mask * score_mask_repeat
+            else:
+                raise ValueError(f"Filter type {self.config.filter_type} is not supported.")
+            batch_mask = score_mask
+        elif self.config.filter_or_reweight == "reweight":
+            # reweight responses
+            scores = scores * self.config.temperature
+            if self.config.clip_weighting:
+                scores = torch.clamp(scores, min=-self.config.clip_weighting_value_min, max=self.config.clip_weighting_value_max)
+            if self.config.reweight_type == "softmax":
+                # reweight responses using softmax
+                reweight_scores = torch.softmax(scores, dim=-1)
+                reweight_scores_repeat = reweight_scores.unsqueeze(-1).repeat(1, mask.shape[-1])
+                assert reweight_scores_repeat.shape == mask.shape
+                updated_mask = mask * reweight_scores_repeat
+            elif self.config.reweight_type == "sigmoid":
+                # reweight responses using sigmoid
+                reweight_scores = torch.sigmoid(scores)
+                reweight_scores_repeat = reweight_scores.unsqueeze(-1).repeat(1, mask.shape[-1])
+                assert reweight_scores_repeat.shape == mask.shape
+                updated_mask = mask * reweight_scores_repeat
+            else:
+                raise ValueError(f"Reweight type {self.config.reweight_type} is not supported.")
+            batch_mask = reweight_scores
 
-        vpredclipped = clip_by_value(
-            vpreds,
-            values - self.config.cliprange_value,
-            values + self.config.cliprange_value,
-        )
-
-        vf_losses1 = (vpreds - returns) ** 2
-        vf_losses2 = (vpredclipped - returns) ** 2
-        vf_loss = 0.5 * masked_mean(torch.max(vf_losses1, vf_losses2), mask)
-        vf_clipfrac = masked_mean(torch.gt(vf_losses2, vf_losses1).float(), mask)
-
-        ratio = torch.exp(logprobs - old_logprobs)
-
-        pg_losses = -advantages * ratio
-        pg_losses2 = -advantages * torch.clamp(ratio, 1.0 - self.config.cliprange, 1.0 + self.config.cliprange)
-
-        pg_loss = masked_mean(torch.max(pg_losses, pg_losses2), mask)
-        pg_clipfrac = masked_mean(torch.gt(pg_losses2, pg_losses).float(), mask)
-
-        loss = pg_loss + self.config.vf_coef * vf_loss
-
-        avg_ratio = masked_mean(ratio, mask).item()
-        if avg_ratio > self.config.ratio_threshold:
-            warnings.warn(
-                f"The average ratio of batch ({avg_ratio:.2f}) exceeds threshold {self.config.ratio_threshold:.2f}. Skipping batch."
-            )
-            pg_loss = pg_loss * 0.0
-            vf_loss = vf_loss * 0.0
-            loss = loss * 0.0
+        nll_loss = masked_mean(-logprobs, updated_mask)
 
         entropy = masked_mean(entropy_from_logits(logits), mask)
-
         approxkl = 0.5 * masked_mean((logprobs - old_logprobs) ** 2, mask)
         policykl = masked_mean(old_logprobs - logprobs, mask)
 
-        return_mean, return_var = masked_mean(returns, mask), masked_var(returns, mask)
-        value_mean, value_var = masked_mean(values, mask), masked_var(values, mask)
-
         stats = dict(
-            loss=dict(policy=pg_loss.detach(), value=vf_loss.detach(), total=loss.detach()),
+            loss=dict(
+                unweighted_nll_loss=unweighted_nll_loss.detach(),
+                nll_loss=nll_loss.detach()
+            ),
+            reweighting=dict(
+                batch_mask=batch_mask.detach(),
+                batch_mask_mean=batch_mask.mean().detach(),
+                batch_mask_std=batch_mask.std().detach(),
+                batch_mask_min=batch_mask.min().detach(),
+                batch_mask_max=batch_mask.max().detach(),
+                scores=scores.detach(),
+                scores_mean=scores.mean().detach(),
+                scores_std=scores.std().detach(),
+                scores_min=scores.min().detach(),
+                scores_max=scores.max().detach(),
+            ),
             policy=dict(
                 entropy=entropy.detach(),
                 approxkl=approxkl.detach(),
                 policykl=policykl.detach(),
-                clipfrac=pg_clipfrac.detach(),
-                advantages=advantages.detach(),
-                advantages_mean=masked_mean(advantages, mask).detach(),
-                ratio=ratio.detach(),
-            ),
-            returns=dict(mean=return_mean.detach(), var=return_var.detach()),
-            val=dict(
-                vpred=masked_mean(vpreds, mask).detach(),
-                error=masked_mean((vpreds - returns) ** 2, mask).detach(),
-                clipfrac=vf_clipfrac.detach(),
-                mean=value_mean.detach(),
-                var=value_var.detach(),
-            ),
+                logprob_mean=logprobs.detach().mean(),
+                masked_logprob_mean=masked_mean(logprobs, mask).detach(),
+            )
         )
-        return pg_loss, self.config.vf_coef * vf_loss, flatten_dict(stats)
+        return nll_loss, flatten_dict(stats)
 
     def record_step_stats(self, kl_coef: float, **data):
         """
@@ -1253,9 +1158,9 @@ class PPOTrainer(BaseTrainer):
             "objective/ref_logprobs": data["ref_logprobs"],
             "objective/kl_coef": kl_coef,
             "objective/entropy": mean_entropy,
-            "ppo/mean_non_score_reward": mean_non_score_reward,
-            "ppo/mean_scores": mean_scores,
-            "ppo/std_scores": std_scores,
+            "rbc/mean_non_score_reward": mean_non_score_reward,
+            "rbc/mean_scores": mean_scores,
+            "rbc/std_scores": std_scores,
         }
 
         # Log text properties
@@ -1270,8 +1175,8 @@ class PPOTrainer(BaseTrainer):
         stats["tokens/responses_dist"] = response_lens.cpu().numpy()
 
         for k, v in data["train_stats"].items():
-            stats[f"ppo/{k}"] = torch.mean(v, axis=0)
-        stats["ppo/val/var_explained"] = 1 - stats["ppo/val/error"] / stats["ppo/returns/var"]
+            stats[f"rbc/{k}"] = torch.mean(v, axis=0)
+        stats["rbc/val/var_explained"] = 1 - stats["rbc/val/error"] / stats["rbc/returns/var"]
         return stats
 
     def log_stats(
