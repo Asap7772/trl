@@ -147,3 +147,7 @@ wandb/
 
 # slurm logs
 slurm-*.out
+
+output_checkpoints/
+sft_output/
+sft_best*/

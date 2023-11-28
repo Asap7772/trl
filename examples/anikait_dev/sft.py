@@ -1,12 +1,21 @@
 print('Starting imports')
 
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments
-from datasets import load_dataset
+import os
+
+os.environ["WANDB__SERVICE_WAIT"] = "600"
+os.environ["WANDB_INIT_TIMEOUT"] = "600"
+
+import re
+from datasets import concatenate_datasets, load_from_disk, Dataset, DatasetDict, load_dataset
 from trl import SFTTrainer, DataCollatorForCompletionOnlyLM
 from absl import app, flags
 print('Done with imports')
 
 FLAGS = flags.FLAGS
+flags.DEFINE_string('dataset_path', "tatsu-lab/alpaca_farm", 'the path to the dataset')
+flags.DEFINE_integer('num_samples', 19000, 'the number of samples to use from the dataset')
+flags.DEFINE_string('pretrained_dir', "/iris/u/asap7772/trl/output_checkpoints/checkpoint-7500", 'the output directory')
 flags.DEFINE_string('output_dir', None, 'the output directory')
 flags.DEFINE_integer('batch_size', 4, 'the batch size')
 flags.DEFINE_float('learning_rate', 8e-6, 'the learning rate')
@@ -23,31 +32,112 @@ flags.DEFINE_integer("max_seq_length", 512, "The maximum sequence length")
 PROMPT_TOKEN = '<|prompter|>'
 ASSISTANT_TOKEN = '<|assistant|>'
 
-def main(_):
-    dataset = load_dataset("tatsu-lab/alpaca_farm", split="sft")
+def get_dataset(path, num_samples=-1, return_test_data=True, num_samples_test=1000):
+    assert os.path.exists(path)
+    folders = os.listdir(path)
+    regex = r"^\d+-\d+$"
+    folders = [x for x in folders if re.search(regex, x)]
+    folders.sort(key=lambda x: int(x.split("-")[0]))
+    total_samples = int(folders[-1].split("-")[-1])
 
-    model = AutoModelForCausalLM.from_pretrained("EleutherAI/pythia-1.4b")
-    tokenizer = AutoTokenizer.from_pretrained("EleutherAI/pythia-1.4b")
+    assert 0 < num_samples <= total_samples - num_samples_test, f"num_samples {num_samples} must be between 0 and {total_samples} - {num_samples_test}"
+    assert 0 < num_samples_test <= total_samples, f"num_samples_test {num_samples_test} must be between 0 and {total_samples}"
+    
+    num_samples_train = num_samples if num_samples > 0 else total_samples - num_samples_test
+    test_folders = [x for x in folders if int(x.split("-")[0]) >= num_samples_train]
+    folders = [x for x in folders if int(x.split("-")[0]) < num_samples_train]
+    
+    datasets = [load_from_disk(os.path.join(path, x)) for x in folders]
+    full_data =  concatenate_datasets(datasets)
+    
+    if num_samples > 0:
+        full_data = full_data.select(range(num_samples))
+        
+    if return_test_data:
+        test_datasets = [load_from_disk(os.path.join(path, x)) for x in test_folders]
+        test_data = concatenate_datasets(test_datasets)
+        if num_samples_test > 0:
+            test_data = test_data.select(range(num_samples_test))
+        return full_data, test_data
+    
+    return full_data
+    
+
+def construct_dataset(
+    path,
+    num_samples=-1,
+    concatenate_prompt=False,
+    num_samples_test=1000,
+):
+    data, test_data = get_dataset(path, num_samples=num_samples, return_test_data=True, num_samples_test=num_samples_test)
+
+    if concatenate_prompt:
+        def map_fn(d):
+            for k in ["y_ref", "y_w", "y_l"]:
+                d[k] = d["prompt"] + d[k]
+            return d
+        
+        data = data.map(
+            map_fn,
+            num_proc=FLAGS.num_proc,
+        )
+
+    dataset_name = os.path.basename(path).split(".")[0]
+
+    ds = DatasetDict(
+        {
+            "train": data,
+            "test": test_data,
+        }
+    ) 
+    return dataset_name, ds
+
+def main(_):
+    if FLAGS.dataset_path == "tatsu-lab/alpaca_farm":
+        dataset = load_dataset(FLAGS.dataset_path, split="sft")
+        eval_dataset = load_dataset(FLAGS.dataset_path, split="preference")
+    else:
+        dataset_name, dataset = construct_dataset(
+            path=FLAGS.dataset_path,
+            num_samples=FLAGS.num_samples,
+            concatenate_prompt=False,
+        )
+        print('Loaded dataset', dataset_name)
+        dataset, eval_dataset = dataset['train'], dataset['test']
+    tokenizer = AutoTokenizer.from_pretrained(FLAGS.pretrained_dir)
     tokenizer.pad_token = tokenizer.eos_token
     eos = tokenizer.eos_token
 
-    def formatting_prompts_func(example):
-        output_texts = []
-        for i in range(len(example['instruction'])):
-            inst, inp, out = example['instruction'][i], example['input'][i], example['output'][i]
-            if inp:
-                text = f"{PROMPT_TOKEN}{inst}\n{inp}{eos}{ASSISTANT_TOKEN}{out}{eos}"
-            else:
-                text = f"{PROMPT_TOKEN}{inst}{eos}{ASSISTANT_TOKEN}{out}{eos}"
-            output_texts.append(text)
-        return output_texts
+    if FLAGS.dataset_path == "tatsu-lab/alpaca_farm":
+        def formatting_prompts_func(example):
+            output_texts = []
+            for i in range(len(example['instruction'])):
+                inst, inp, out = example['instruction'][i], example['input'][i], example['output'][i]
+                if inp:
+                    text = f"{PROMPT_TOKEN}{inst}\n{inp}{eos}{ASSISTANT_TOKEN}{out}{eos}"
+                else:
+                    text = f"{PROMPT_TOKEN}{inst}{eos}{ASSISTANT_TOKEN}{out}{eos}"
+                output_texts.append(text)
+            return output_texts
+    else:
+        def formatting_prompts_func(example): 
+            # return example['y_w']
+            return example['y_1']
 
+    model = AutoModelForCausalLM.from_pretrained(FLAGS.pretrained_dir)
+    instruction_template = PROMPT_TOKEN
     response_template = ASSISTANT_TOKEN
-    collator = DataCollatorForCompletionOnlyLM(response_template, tokenizer=tokenizer)
+    collator = DataCollatorForCompletionOnlyLM(
+        response_template=response_template,
+        instruction_template=instruction_template,
+        tokenizer=tokenizer
+    )
 
     extra_kwargs = {}
     if FLAGS.output_dir is not None:
         extra_kwargs['output_dir'] = FLAGS.output_dir
+    else:
+        extra_kwargs['output_dir'] = f"/iris/u/asap7772/trl/output_checkpoints_rerun/"
 
     training_args = TrainingArguments(
         do_predict=True,
@@ -64,6 +154,7 @@ def main(_):
         per_device_train_batch_size=FLAGS.batch_size,
         per_device_eval_batch_size=FLAGS.batch_size,
         num_train_epochs=FLAGS.num_train_epochs,
+        run_name=os.path.basename(FLAGS.output_dir),
         **extra_kwargs
     )
 
@@ -71,6 +162,7 @@ def main(_):
         model,
         args=training_args,
         train_dataset=dataset,
+        eval_dataset=eval_dataset,
         formatting_func=formatting_prompts_func,
         data_collator=collator,
         max_seq_length=FLAGS.max_seq_length,

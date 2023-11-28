@@ -5,8 +5,8 @@
 #SBATCH --cpus-per-task=16 # Request 8 CPUs for this task
 #SBATCH --mem=48G # Request 32GB of memory
 #SBATCH --gres=gpu:1 # Request one GPU
-#SBATCH --job-name=sft_trl # Name the job (for easier monitoring)
+#SBATCH --job-name=sft_trl_multi # Name the job (for easier monitoring)
 #SBATCH --account=iris
 #SBATCH --exclude=iris1,iris2,iris3,iris4,iris-hp-z8
 
-python /iris/u/asap7772/trl/examples/anikait_dev/sft.py
+bash /iris/u/asap7772/trl/examples/anikait_dev/run_sft.sh
