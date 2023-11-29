@@ -12,8 +12,8 @@ import numpy as np
 import tempfile
 
 FLAGS = flags.FLAGS
-flags.DEFINE_string('wandb_project', 'ppo_rew_padfix_rew', 'the wandb project name')
-flags.DEFINE_string('run_name', 'ppo_rew_labnoise0.0_rewnorm', 'the wandb run name')
+flags.DEFINE_string('wandb_project', 'reweighted_bc', 'the wandb project name')
+flags.DEFINE_string('run_name', 'reweighted_bc', 'the wandb run name')
 flags.DEFINE_string('output_dir', None, 'the output directory')
 flags.DEFINE_string('dataset_path', "tatsu-lab/alpaca_farm", 'the path to the dataset')
 flags.DEFINE_string('tokenizer_type', "EleutherAI/pythia-1.4b", 'the model name')
@@ -28,6 +28,17 @@ flags.DEFINE_float('clip_range', 0.2, 'the clip range')
 flags.DEFINE_float('gae_lambda', 0.95, 'the GAE lambda')
 flags.DEFINE_integer('batch_size', 32, 'the batch size')
 flags.DEFINE_integer('seed', 42, 'the random seed')
+flags.DEFINE_string('filter_or_reweight', 'reweight', 'the type of reweighting to use')
+# flags for reweighting
+flags.DEFINE_float('temperature', 1.0, 'the temperature for reweighting')
+flags.DEFINE_string('weighting_type', 'softmax', 'the type of reweighting to use')
+flags.DEFINE_boolean('clip_weighting', True, 'whether to use score scaling')
+flags.DEFINE_float('clip_min', -10.0, 'the minimum value for score scaling')
+flags.DEFINE_float('clip_max', 10.0, 'the maximum value for score scaling')
+# flags for filtering
+flags.DEFINE_string('filter_type', 'threshold', 'the type of filtering to use')
+flags.DEFINE_float('filter_threshold', 0.0, 'the filter threshold')
+flags.DEFINE_integer('filter_topk', 3, 'the filter threshold')
 
 PROMPT_TOKEN = '<|prompter|>'
 ASSISTANT_TOKEN = '<|assistant|>'
@@ -53,6 +64,15 @@ def main(_):
         tracker_project_name=FLAGS.wandb_project,
         use_score_scaling=True,
         use_score_norm=True,
+        filter_or_reweight=FLAGS.filter_or_reweight,
+        temperature=FLAGS.temperature,
+        weighting_type=FLAGS.weighting_type,
+        clip_weighting=FLAGS.clip_weighting,
+        clip_weighting_value_min=FLAGS.clip_min,
+        clip_weighting_value_max=FLAGS.clip_max,
+        filter_type=FLAGS.filter_type,
+        filter_threshold=FLAGS.filter_threshold,
+        filter_topk=FLAGS.filter_topk,
         project_kwargs={
             'project_dir': output_dir,
         },

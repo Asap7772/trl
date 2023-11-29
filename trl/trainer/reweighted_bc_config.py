@@ -128,17 +128,17 @@ class ReweightedBCConfig:
     """Type of weighting to use"""
     clip_weighting: bool = False
     """Whether to clip the weighting values"""
-    clip_weighting_value_min: float = -1.0
+    clip_weighting_value_min: float = -10.0
     """Minimum value to clip weighting values to"""
-    clip_weighting_value_max: float = 20.0
+    clip_weighting_value_max: float = 10.0
     """Maximum value to clip weighting values to"""
     
     # Reward Filtering Specific Parameters
     filter_type: Literal["topk", "threshold"] = "topk"
     """Type of filtering to use"""
-    filter_value: float = 0.0
+    filter_threshold: float = 0.0
     """Value to use for filtering"""
-    filter_topk: int = 0
+    filter_topk: int = 3
     """Topk value to use for filtering"""
 
     # computed hyperparameters at runtime; we use `tyro.conf.Suppress` to hide them from the help text

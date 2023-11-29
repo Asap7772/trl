@@ -1045,7 +1045,7 @@ class ReweightedBCTrainer(BaseTrainer):
             # filter out bad responses
             if self.config.filter_type == "topk":
                 # filter out the top k responses
-                topk = self.config.filter_value
+                topk = self.config.filter_topk
                 topk_scores, _ = torch.topk(scores, topk, largest=True, sorted=True)
                 baseline_score = topk_scores[-1]
                 score_mask = scores >= baseline_score
@@ -1054,7 +1054,7 @@ class ReweightedBCTrainer(BaseTrainer):
                 updated_mask = mask * score_mask_repeat
             elif self.config.filter_type == "threshold":
                 # filter out responses with scores below a threshold
-                threshold = self.config.filter_value
+                threshold = self.config.filter_threshold
                 score_mask = scores >= threshold
                 score_mask_repeat = score_mask.unsqueeze(-1).repeat(1, mask.shape[-1])
                 assert score_mask_repeat.shape == mask.shape
@@ -1066,7 +1066,8 @@ class ReweightedBCTrainer(BaseTrainer):
             # reweight responses
             scores = scores * self.config.temperature
             if self.config.clip_weighting:
-                scores = torch.clamp(scores, min=-self.config.clip_weighting_value_min, max=self.config.clip_weighting_value_max)
+                old_scores, scores = scores, torch.clamp(scores, min=-self.config.clip_weighting_value_min, max=self.config.clip_weighting_value_max)
+                per_clamped = (scores != old_scores).float().mean()
             if self.config.reweight_type == "softmax":
                 # reweight responses using softmax
                 reweight_scores = torch.softmax(scores, dim=-1)
@@ -1114,6 +1115,15 @@ class ReweightedBCTrainer(BaseTrainer):
                 masked_logprob_mean=masked_mean(logprobs, mask).detach(),
             )
         )
+        
+        if self.config.clip_weighting:
+            stats['clipping'] = dict(
+                per_clip=per_clamped.detach(),
+                pre_clip_mean=old_scores.mean().detach(),
+                pre_clip_std=old_scores.std().detach(),
+                pre_clip_min=old_scores.min().detach(),
+                pre_clip_max=old_scores.max().detach(),
+            )
         return nll_loss, flatten_dict(stats)
 
     def record_step_stats(self, kl_coef: float, **data):
