@@ -10,6 +10,7 @@ import accelerate
 import datetime
 import numpy as np
 import tempfile
+from tqdm import tqdm
 
 FLAGS = flags.FLAGS
 flags.DEFINE_string('wandb_project', 'ppo_rew_padfix_rew', 'the wandb project name')
@@ -23,10 +24,11 @@ flags.DEFINE_float('learning_rate', 1.0e-6, 'the learning rate')
 flags.DEFINE_float('cosine_annealing_lr_eta_min', 1.0e-7, 'the cosine annealing eta min')
 flags.DEFINE_integer('num_train_epochs', 4, 'the number of training epochs')
 flags.DEFINE_integer('num_rollouts', 256, 'the number of rollouts')
-flags.DEFINE_integer('chunk_size', 32, 'the chunk size')
 flags.DEFINE_float('clip_range', 0.2, 'the clip range')
 flags.DEFINE_float('gae_lambda', 0.95, 'the GAE lambda')
-flags.DEFINE_integer('batch_size', 32, 'the batch size')
+flags.DEFINE_integer('batch_size', 256, 'the batch size')
+flags.DEFINE_integer('max_gen_batch_size', 16, 'the max generation batch size')
+flags.DEFINE_integer('mini_batch_size', 32, 'the chunk size')
 flags.DEFINE_integer('seed', 42, 'the random seed')
 
 PROMPT_TOKEN = '<|prompter|>'
@@ -91,8 +93,6 @@ def main(_):
     print('Sample Train prompt:', dataset[0]['query'])
     print('Sample Eval prompt:', eval_dataset[0]['query'])
 
-    from trl import PPOTrainer
-
     ppo_trainer = PPOTrainer(
         model=model,
         config=config,
@@ -141,7 +141,6 @@ def main(_):
                 tokenizer.save_pretrained(checkpoint_dir)
             ppo_trainer.accelerator.print(f"Checkpointing Epoch {epoch_num} -> {checkpoint_dir}")
  
-    from tqdm import tqdm
 
     last_epoch = -1
     for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
@@ -150,7 +149,14 @@ def main(_):
         query_tensors = accelerate.utils.send_to_device(query_tensors, ppo_trainer.accelerator.device)
         
         #### Get generations from SFTModel (including prompt)
-        generation_tokens = ppo_trainer.accelerator.unwrap_model(ppo_trainer.model).generate(**query_tensors, **generation_kwargs)
+        if query_tensors.input_ids.shape[0] > FLAGS.max_gen_batch_size:
+            generation_tokens = []
+            for i in tqdm(range(0, query_tensors.input_ids.shape[0], FLAGS.max_gen_batch_size), desc=f"Generating for epoch {epoch}"):
+                generation_tokens.append(ppo_trainer.accelerator.unwrap_model(ppo_trainer.model).generate(**query_tensors[i:i+FLAGS.max_gen_batch_size], **generation_kwargs))
+                torch.cuda.empty_cache()
+            generation_tokens = torch.cat(generation_tokens, dim=0)
+        else:
+            generation_tokens = ppo_trainer.accelerator.unwrap_model(ppo_trainer.model).generate(**query_tensors, **generation_kwargs)
         texts = tokenizer.batch_decode(generation_tokens, skip_special_tokens=True)
         
         #### Update batch with response
