@@ -28,7 +28,7 @@ flags.DEFINE_float('clip_range', 0.2, 'the clip range')
 flags.DEFINE_float('gae_lambda', 0.95, 'the GAE lambda')
 flags.DEFINE_integer('batch_size', 256, 'the batch size')
 flags.DEFINE_integer('max_gen_batch_size', 16, 'the max generation batch size')
-flags.DEFINE_integer('mini_batch_size', 32, 'the chunk size')
+flags.DEFINE_integer('mini_batch_size', 8, 'the chunk size')
 flags.DEFINE_integer('seed', 42, 'the random seed')
 flags.DEFINE_string('filter_or_reweight', 'reweight', 'the type of reweighting to use')
 # flags for reweighting
@@ -194,7 +194,7 @@ def main(_):
         query_tensors = query_tensors.input_ids
         query_tensors = [query_tensors[i] for i in range(0, len(query_tensors))]
 
-        #### Run PPO step
+        #### Run RBC step
         stats = rbc_trainer.step(query_tensors, response_tensors, rewards)
         rbc_trainer.log_stats(stats, batch, rewards)
         

@@ -54,7 +54,7 @@ from ..core import (
 from ..import_utils import is_torch_greater_2_0
 from ..models import SUPPORTED_ARCHITECTURES, PreTrainedModelWrapper, create_reference_model
 from . import AdaptiveKLController, BaseTrainer, FixedKLController, ReweightedBCConfig, RunningMoments
-
+import tqdm
 
 if is_deepspeed_available():
     import deepspeed
@@ -713,7 +713,7 @@ class ReweightedBCTrainer(BaseTrainer):
         t = time.time()
         all_stats = []
         early_stop = False
-        for _ in range(self.config.ppo_epochs):
+        for _ in tqdm.tqdm(range(self.config.ppo_epochs)):
             if early_stop:
                 break
             b_inds = np.random.permutation(bs)
@@ -986,7 +986,6 @@ class ReweightedBCTrainer(BaseTrainer):
                 Dictionary of training statistics
         """
         self.model.train()
-        breakpoint()
         loss, train_stats = self.loss(old_logprobs, logits, logprobs, mask, scores)
         self.accelerator.backward(loss)
         if self.config.max_grad_norm is not None:
@@ -1037,7 +1036,6 @@ class ReweightedBCTrainer(BaseTrainer):
             scores (`torch.FloatTensor`):
                 Scores from the reward model, shape (`batch_size`)
         """
-        
         unweighted_nll_loss = masked_mean(-logprobs, mask)
         
         batch_mask=None
@@ -1066,15 +1064,15 @@ class ReweightedBCTrainer(BaseTrainer):
             # reweight responses
             scores = scores * self.config.temperature
             if self.config.clip_weighting:
-                old_scores, scores = scores, torch.clamp(scores, min=-self.config.clip_weighting_value_min, max=self.config.clip_weighting_value_max)
+                old_scores, scores = scores, torch.clamp(scores, min=self.config.clip_weighting_value_min, max=self.config.clip_weighting_value_max)
                 per_clamped = (scores != old_scores).float().mean()
-            if self.config.reweight_type == "softmax":
+            if self.config.weighting_type == "softmax":
                 # reweight responses using softmax
                 reweight_scores = torch.softmax(scores, dim=-1)
                 reweight_scores_repeat = reweight_scores.unsqueeze(-1).repeat(1, mask.shape[-1])
                 assert reweight_scores_repeat.shape == mask.shape
                 updated_mask = mask * reweight_scores_repeat
-            elif self.config.reweight_type == "sigmoid":
+            elif self.config.weighting_type == "sigmoid":
                 # reweight responses using sigmoid
                 reweight_scores = torch.sigmoid(scores)
                 reweight_scores_repeat = reweight_scores.unsqueeze(-1).repeat(1, mask.shape[-1])
@@ -1147,9 +1145,6 @@ class ReweightedBCTrainer(BaseTrainer):
         mean_kl = kl_list.mean()
         mean_entropy = (-data["logprobs"] * mask).sum(axis=-1).mean()
 
-        mean_non_score_reward = masked_mean(
-            data["non_score_reward"], mask
-        )  # non_score_reward is size `batch_size`, `response_length`
         mean_scores = data["scores"].mean()  # scores is size `batch_size`
         std_scores = data["scores"].std()
 
@@ -1168,7 +1163,6 @@ class ReweightedBCTrainer(BaseTrainer):
             "objective/ref_logprobs": data["ref_logprobs"],
             "objective/kl_coef": kl_coef,
             "objective/entropy": mean_entropy,
-            "rbc/mean_non_score_reward": mean_non_score_reward,
             "rbc/mean_scores": mean_scores,
             "rbc/std_scores": std_scores,
         }
@@ -1186,7 +1180,6 @@ class ReweightedBCTrainer(BaseTrainer):
 
         for k, v in data["train_stats"].items():
             stats[f"rbc/{k}"] = torch.mean(v, axis=0)
-        stats["rbc/val/var_explained"] = 1 - stats["rbc/val/error"] / stats["rbc/returns/var"]
         return stats
 
     def log_stats(
