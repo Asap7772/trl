@@ -152,3 +152,4 @@ output_checkpoints/
 sft_output/
 sft_best*/
 ppo_rew_padfix*/
+reweighted_bc/

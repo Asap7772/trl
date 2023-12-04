@@ -147,6 +147,7 @@ class ReweightedBCTrainer(BaseTrainer):
         data_collator: Optional[typing.Callable] = None,
         num_shared_layers: Optional[int] = None,
         lr_scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
+        dataloader_batch_size: Optional[int] = None,
     ):
         """
         Initialize ReweightedBCTrainer.
@@ -377,7 +378,7 @@ class ReweightedBCTrainer(BaseTrainer):
             dataset = self._remove_unused_columns(dataset)
         dataloader = torch.utils.data.DataLoader(
             dataset,
-            batch_size=self.config.batch_size,
+            batch_size=self.config.dataloader_batch_size or self.config.batch_size,
             collate_fn=data_collator,
             shuffle=True,
             drop_last=True,

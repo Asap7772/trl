@@ -87,6 +87,8 @@ class PPOConfig:
     """Scaling factor for value loss"""
     batch_size: int = 256
     """Number of samples per optimisation step"""
+    dataloader_batch_size: Optional[int] = None
+    """Size of batches to use for dataloader. If None, will be equal to `batch_size`. Set to lower if doing concatenation of samples separately."""
     forward_batch_size: Optional[int] = None
     """DEPRECATED: use `mini_batch_size` instead, which does the same thing."""
     mini_batch_size: int = 1
