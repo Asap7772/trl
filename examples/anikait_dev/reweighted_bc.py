@@ -41,6 +41,9 @@ flags.DEFINE_integer('max_gen_batch_size', 16, 'the max generation batch size')
 flags.DEFINE_integer('mini_batch_size', 8, 'the chunk size')
 flags.DEFINE_integer('seed', 42, 'the random seed')
 flags.DEFINE_string('filter_or_reweight', 'reweight', 'the type of reweighting to use')
+# score manipulation
+flags.DEFINE_bool('use_score_scaling', False, 'whether to use score scaling')
+flags.DEFINE_bool('use_score_norm', False, 'whether to use score normalization')
 # flags for reweighting
 flags.DEFINE_float('temperature', 1.0, 'the temperature for reweighting')
 flags.DEFINE_string('weighting_type', 'softmax', 'the type of reweighting to use')
@@ -190,8 +193,8 @@ def main(_):
         mini_batch_size=FLAGS.mini_batch_size,
         ppo_epochs=FLAGS.num_train_epochs,
         tracker_project_name=FLAGS.wandb_project,
-        use_score_scaling=True,
-        use_score_norm=True,
+        use_score_scaling=FLAGS.use_score_scaling,
+        use_score_norm=FLAGS.use_score_norm,
         filter_or_reweight=FLAGS.filter_or_reweight,
         temperature=FLAGS.temperature,
         weighting_type=FLAGS.weighting_type,

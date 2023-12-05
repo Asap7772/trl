@@ -4,7 +4,7 @@ export PYTHONPATH=/iris/u/asap7772/trl:$PYTHONPATH
 
 mix_ratios=(0.5 0.0)
 use_gold_rews=(true false)
-wandb_project="reweighted_bc"
+wandb_project="reweighted_bc_no_score_norm"
 dryrun=false
 debug=false
 which_exp=${1:--1}

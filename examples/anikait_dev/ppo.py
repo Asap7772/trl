@@ -40,6 +40,9 @@ flags.DEFINE_integer('batch_size', 256, 'the batch size')
 flags.DEFINE_integer('max_gen_batch_size', 16, 'the max generation batch size')
 flags.DEFINE_integer('mini_batch_size', 8, 'the chunk size')
 flags.DEFINE_integer('seed', 42, 'the random seed')
+# score manipulation
+flags.DEFINE_bool('use_score_scaling', False, 'whether to use score scaling')
+flags.DEFINE_bool('use_score_norm', False, 'whether to use score normalization')
 # flags for preference dataset
 flags.DEFINE_string('preference_dataset_path', '/iris/u/asap7772/conservative_reward_model/data_trl/relabeled_alpacafarm_pythiasft_20K_preference_data', 'the path to the preference dataset')
 flags.DEFINE_integer('preference_num_samples', 19000, 'the number of samples to use from the preference dataset')
@@ -179,8 +182,8 @@ def main(_):
         mini_batch_size=FLAGS.mini_batch_size,
         ppo_epochs=FLAGS.num_train_epochs,
         tracker_project_name=FLAGS.wandb_project,
-        use_score_scaling=True,
-        use_score_norm=True,
+        use_score_scaling=FLAGS.use_score_scaling,
+        use_score_norm=FLAGS.use_score_norm,
         project_kwargs={
             'project_dir': output_dir,
         },
@@ -333,7 +336,7 @@ def main(_):
     )
 
     last_epoch = -1
-    # TODO (anikait): setup batch mixing with preference dataset
+
     if batch_size_online_data == 0:
         zipped_dataloaders = pref_dataset_dataloader
     elif batch_size_pref_data == 0:

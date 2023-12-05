@@ -3,7 +3,7 @@ export HF_DATASETS_CACHE="/iris/u/asap7772/.cache"
 export PYTHONPATH=/iris/u/asap7772/trl:$PYTHONPATH
 
 mix_ratios=(0.0 0.5)
-wandb_project="ppo_rew_padfix_rew"
+wandb_project="ppo_rew_no_score_norm"
 dryrun=false
 debug=false
 which_exp=${1:--1}

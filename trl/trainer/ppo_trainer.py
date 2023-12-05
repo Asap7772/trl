@@ -377,7 +377,7 @@ class PPOTrainer(BaseTrainer):
             dataset = self._remove_unused_columns(dataset)
         dataloader = torch.utils.data.DataLoader(
             dataset,
-            batch_size=self.config.batch_size,
+            batch_size=self.config.dataloader_batch_size or self.config.batch_size,
             collate_fn=data_collator,
             shuffle=True,
             drop_last=True,
