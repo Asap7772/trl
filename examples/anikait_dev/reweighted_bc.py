@@ -29,7 +29,7 @@ flags.DEFINE_string('output_dir', None, 'the output directory')
 flags.DEFINE_string('dataset_path', "tatsu-lab/alpaca_farm", 'the path to the dataset')
 flags.DEFINE_string('tokenizer_type', "EleutherAI/pythia-1.4b", 'the model name')
 flags.DEFINE_string('pretrained_dir', "/iris/u/asap7772/trl/output_checkpoints/checkpoint-7500", 'the path to the pretrained model')
-flags.DEFINE_string('reward_model', "/iris/u/asap7772/conservative_reward_model/model_checkpoints_rewpref/rewpref_fixpad_labnoise_14m_1127/EleutherAI_pythia-14m_relabeled_alpacafarm_pythiasft_20K_preference_data_19000_0.0_1e-05_0.0/20231127-120834/epoch_5/", 'the path to the reward model')
+flags.DEFINE_string('reward_model', "/iris/u/asap7772/conservative_reward_model/data/exp_checkpoints/model_checkpoints_rewpref/rewpref_fixpad_labnoise_14m_1127/EleutherAI_pythia-14m_relabeled_alpacafarm_pythiasft_20K_preference_data_19000_0.0_1e-05_0.0/20231127-120834/epoch_5/", 'the path to the reward model')
 flags.DEFINE_float('learning_rate', 1.0e-6, 'the learning rate')
 flags.DEFINE_float('cosine_annealing_lr_eta_min', 1.0e-7, 'the cosine annealing eta min')
 flags.DEFINE_integer('num_train_epochs', 4, 'the number of training epochs')
@@ -55,7 +55,7 @@ flags.DEFINE_string('filter_type', 'threshold', 'the type of filtering to use')
 flags.DEFINE_float('filter_threshold', 0.0, 'the filter threshold')
 flags.DEFINE_integer('filter_topk', 3, 'the filter threshold')
 # flags for preference dataset
-flags.DEFINE_string('preference_dataset_path', '/iris/u/asap7772/conservative_reward_model/data_trl/relabeled_alpacafarm_pythiasft_20K_preference_data', 'the path to the preference dataset')
+flags.DEFINE_string('preference_dataset_path', '/iris/u/asap7772/conservative_reward_model/data/preference_datasets/relabeled_alpacafarm_pythiasft_20K_preference_data', 'the path to the preference dataset')
 flags.DEFINE_integer('preference_num_samples', 19000, 'the number of samples to use from the preference dataset')
 flags.DEFINE_bool("batched", True, "Whether to use batched processing")
 flags.DEFINE_integer("num_proc", 32, "Number of processes to use")
@@ -135,7 +135,7 @@ def main(_):
     dataset = load_dataset(FLAGS.dataset_path, split="unlabeled")
     eval_dataset = load_dataset(FLAGS.dataset_path, split="val")
 
-    output_dir = FLAGS.output_dir or f"/iris/u/asap7772/trl/{FLAGS.wandb_project}/{FLAGS.run_name}"
+    output_dir = FLAGS.output_dir or f"/iris/u/asap7772/trl/exp_checkpoints/{FLAGS.wandb_project}/{FLAGS.run_name}"
     model_name = f"{FLAGS.wandb_project}_{FLAGS.run_name}"
     
     print('Output dir:', output_dir)
@@ -247,6 +247,7 @@ def main(_):
         config=config,
         dataset=dataset,
         tokenizer=tokenizer,
+        additional_config_kwargs=FLAGS.flag_values_dict(),
     )
 
     generation_kwargs = {
@@ -356,7 +357,6 @@ def main(_):
     )
 
     last_epoch = -1
-    # TODO (anikait): setup batch mixing with preference dataset
     if batch_size_online_data == 0:
         zipped_dataloaders = pref_dataset_dataloader
     elif batch_size_pref_data == 0:
@@ -421,6 +421,9 @@ def main(_):
             pref_response_tensors = accelerate.utils.send_to_device(pref_response_tensors, trainer.accelerator.device)
             
             pref_texts = pref_batch["text"]
+            
+            if FLAGS.use_gold_reward_model and batch is None: # Need to move to gpu
+                gold_model = trainer.accelerator.prepare_model(gold_model)
             pref_rewards = rew_fn(pref_texts)
             
             # now append the preference dataset to the batch

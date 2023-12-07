@@ -2,12 +2,13 @@ exp_num=0
 export HF_DATASETS_CACHE="/iris/u/asap7772/.cache"
 export PYTHONPATH=/iris/u/asap7772/trl:$PYTHONPATH
 
-mix_ratios=(0.5 0.0)
-use_gold_rews=(true false)
-wandb_project="reweighted_bc_no_score_norm"
+mix_ratios=(1.0) # fully preference data
+use_gold_rews=(true)
+wandb_project="reweighted_bc_score_norm_tempablation"
 dryrun=false
 debug=false
 which_exp=${1:--1}
+temperatures=(1.0 2.0 5.0 10.0 20.0 50.0)
 
 if [[ $debug = true ]]; then
     echo "Running in debug mode"
@@ -16,6 +17,7 @@ fi
 
 for mix_ratio in "${mix_ratios[@]}"; do
 for use_gold_rew in "${use_gold_rews[@]}"; do
+for temperature in "${temperatures[@]}"; do
     if [[ $exp_num != $which_exp && $which_exp -ge 0 ]]; then
         exp_num=$((exp_num+1))
         continue
@@ -26,8 +28,11 @@ for use_gold_rew in "${use_gold_rews[@]}"; do
 
     command="python /iris/u/asap7772/trl/examples/anikait_dev/reweighted_bc.py \
         --wandb_project $wandb_project \
-        --run_name reweighted_bc_usegoldrew${use_gold_rew}_mixratio${mix_ratio} \
+        --run_name reweighted_bc_usegoldrew${use_gold_rew}_mixratio${mix_ratio}_temp${temperature} \
         --mixing_ratio ${mix_ratio} \
+        --temperature ${temperature} \
+        --use_score_scaling True \
+        --use_score_norm True \
     "
 
     if [[ $use_gold_rew = true ]]; then
@@ -44,5 +49,6 @@ for use_gold_rew in "${use_gold_rews[@]}"; do
     fi
     exp_num=$((exp_num+1))
 
+done
 done
 done

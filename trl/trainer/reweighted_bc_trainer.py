@@ -147,7 +147,7 @@ class ReweightedBCTrainer(BaseTrainer):
         data_collator: Optional[typing.Callable] = None,
         num_shared_layers: Optional[int] = None,
         lr_scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
-        dataloader_batch_size: Optional[int] = None,
+        additional_config_kwargs: Optional[dict] = None,
     ):
         """
         Initialize ReweightedBCTrainer.
@@ -212,9 +212,12 @@ class ReweightedBCTrainer(BaseTrainer):
         config.is_peft_model = self.is_peft_model
 
         is_using_tensorboard = config.log_with is not None and config.log_with == "tensorboard"
+        current_config = dict(trl_rbc_trainer_config=config.to_dict()) if not is_using_tensorboard else config.to_dict()
+        current_config.update(flatten_dict(additional_config_kwargs or {}))
+        
         self.accelerator.init_trackers(
             config.tracker_project_name,
-            config=dict(trl_ppo_trainer_config=config.to_dict()) if not is_using_tensorboard else config.to_dict(),
+            config=current_config,
             init_kwargs=config.tracker_kwargs,
         )
         self.is_using_text_environment = getattr(config, "use_text_environment", False)
