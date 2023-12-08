@@ -16,10 +16,12 @@ import torch
 from absl import flags, app
 import os
 import accelerate
+import gc
 import datetime
 import numpy as np
 import tempfile
 from tqdm import tqdm
+import wandb
 import re
 
 FLAGS = flags.FLAGS
@@ -32,14 +34,18 @@ flags.DEFINE_string('pretrained_dir', "/iris/u/asap7772/trl/output_checkpoints/c
 flags.DEFINE_string('reward_model', "/iris/u/asap7772/conservative_reward_model/data/exp_checkpoints/model_checkpoints_rewpref/rewpref_fixpad_labnoise_14m_1127/EleutherAI_pythia-14m_relabeled_alpacafarm_pythiasft_20K_preference_data_19000_0.0_1e-05_0.0/20231127-120834/epoch_5/", 'the path to the reward model')
 flags.DEFINE_float('learning_rate', 1.0e-6, 'the learning rate')
 flags.DEFINE_float('cosine_annealing_lr_eta_min', 1.0e-7, 'the cosine annealing eta min')
-flags.DEFINE_integer('num_train_epochs', 4, 'the number of training epochs')
-flags.DEFINE_integer('num_rollouts', 256, 'the number of rollouts')
+flags.DEFINE_integer('num_train_epochs', 10, 'the number of training epochs')
+flags.DEFINE_integer('inner_iteration_steps', 4, 'the number of training epochs')
+flags.DEFINE_integer('eval_every_steps', 10, 'how often to evaluate')
+flags.DEFINE_integer('num_eval_batches', 8, 'the number of evaluation batches of size gold shard size')
 flags.DEFINE_float('clip_range', 0.2, 'the clip range')
 flags.DEFINE_float('gae_lambda', 0.95, 'the GAE lambda')
 flags.DEFINE_integer('batch_size', 256, 'the batch size')
 flags.DEFINE_integer('max_gen_batch_size', 16, 'the max generation batch size')
 flags.DEFINE_integer('mini_batch_size', 8, 'the chunk size')
 flags.DEFINE_integer('seed', 42, 'the random seed')
+flags.DEFINE_integer('gradient_accumulation_steps', 1, 'the gradient accumulation steps')
+
 # score manipulation
 flags.DEFINE_bool('use_score_scaling', False, 'whether to use score scaling')
 flags.DEFINE_bool('use_score_norm', False, 'whether to use score normalization')
@@ -124,7 +130,7 @@ def main(_):
     dataset = load_dataset(FLAGS.dataset_path, split="unlabeled")
     eval_dataset = load_dataset(FLAGS.dataset_path, split="val")
 
-    output_dir = FLAGS.output_dir or f"/iris/u/asap7772/trl/{FLAGS.wandb_project}/{FLAGS.run_name}"
+    output_dir = FLAGS.output_dir or f"/iris/u/asap7772/trl/exp_checkpoints/{FLAGS.wandb_project}/{FLAGS.run_name}"
     model_name = f"{FLAGS.wandb_project}_{FLAGS.run_name}"
     
     print('Output dir:', output_dir)
@@ -172,6 +178,7 @@ def main(_):
     wandb_output_dir = tempfile.mkdtemp()
     config = PPOConfig(
         model_name=FLAGS.pretrained_dir,
+        gradient_accumulation_steps=FLAGS.gradient_accumulation_steps,
         learning_rate=FLAGS.learning_rate,
         reward_model=FLAGS.reward_model,
         lam=FLAGS.gae_lambda,
@@ -180,7 +187,7 @@ def main(_):
         batch_size=FLAGS.batch_size,
         dataloader_batch_size=max(batch_size_online_data, 1),
         mini_batch_size=FLAGS.mini_batch_size,
-        ppo_epochs=FLAGS.num_train_epochs,
+        ppo_epochs=FLAGS.inner_iteration_steps,
         tracker_project_name=FLAGS.wandb_project,
         use_score_scaling=FLAGS.use_score_scaling,
         use_score_norm=FLAGS.use_score_norm,
@@ -248,6 +255,16 @@ def main(_):
 
     print("Loaded reward model")
 
+    def empty_cache_decorator(func):
+        def func_wrapper(*args, **kwargs):
+            gc.collect()
+            torch.cuda.empty_cache()
+            gc.collect()
+            return func(*args, **kwargs)
+        return func_wrapper
+
+    @empty_cache_decorator
+    @torch.no_grad()
     def get_pred_reward(text, max_len=512):
         with torch.no_grad():
             encoded_input = reward_tokenizer(text, padding=True, truncation=True, max_length=max_len, return_tensors='pt')
@@ -270,6 +287,7 @@ def main(_):
     gold_model.eval()
     print("Loaded gold reward model")
     
+    @empty_cache_decorator
     @torch.no_grad()
     def get_gold_score(completions, shard_size=1):
         if shard_size >= 1:
@@ -328,15 +346,45 @@ def main(_):
         drop_last=True,
     )
     
-    eval_pref_dataset_dataloader = torch.utils.data.DataLoader(
-        eval_pref_dataset,
-        batch_size=max(batch_size_pref_data, 1),
+    train_as_eval_online_prompt_dataset_dataloader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=max(FLAGS.gold_shard_size * FLAGS.num_eval_batches, 1),
         collate_fn=None,
         shuffle=True,
         drop_last=True,
     )
+    
+    eval_online_prompt_dataset_dataloader = torch.utils.data.DataLoader(
+        eval_dataset,
+        batch_size=max(FLAGS.gold_shard_size * FLAGS.num_eval_batches, 1),
+        collate_fn=None,
+        shuffle=True,
+        drop_last=True,
+    )
+    
+    train_as_eval_pref_dataset_dataloader = torch.utils.data.DataLoader(
+        pref_dataset,
+        batch_size=max(FLAGS.gold_shard_size * FLAGS.num_eval_batches, 1),
+        collate_fn=None,
+        shuffle=True,
+        drop_last=True,
+    )
+    
+    eval_pref_dataset_dataloader = torch.utils.data.DataLoader(
+        eval_pref_dataset,
+        batch_size=max(FLAGS.gold_shard_size * FLAGS.num_eval_batches, 1),
+        collate_fn=None,
+        shuffle=True,
+        drop_last=True,
+    )
+    
+    all_eval_dataloaders = {
+        "train_as_eval_online_prompt": train_as_eval_online_prompt_dataset_dataloader,
+        "train_as_eval_pref": train_as_eval_pref_dataset_dataloader,
+        "eval_online_prompt": eval_online_prompt_dataset_dataloader,
+        "eval_pref": eval_pref_dataset_dataloader,
+    }
 
-    last_epoch = -1
     if batch_size_online_data == 0:
         zipped_dataloaders = pref_dataset_dataloader
     elif batch_size_pref_data == 0:
@@ -348,16 +396,10 @@ def main(_):
         rew_fn = lambda x: get_gold_score(completions=x, shard_size=FLAGS.gold_shard_size)
     else:
         rew_fn = get_pred_reward
-
-    for epoch, batches in tqdm(enumerate(zipped_dataloaders)):
-        if isinstance(batches, tuple) and len(batches) == 2:
-            batch, pref_batch = batches
-        else:
-            if batch_size_online_data == 0:
-                batch, pref_batch = None, batches
-            elif batch_size_pref_data == 0:
-                batch, pref_batch = batches, None
-        
+    
+    @empty_cache_decorator
+    @torch.no_grad()
+    def process_batch(batch):
         if batch is not None:
             #### Construct query tensors
             query_tensors = tokenizer(batch["query"], padding=True, truncation=True, max_length=128, return_tensors='pt')
@@ -380,18 +422,20 @@ def main(_):
             response_tensors = [response_tensors[i] for i in range(0, len(response_tensors))]
 
             #### Compute reward score
-            if FLAGS.use_gold_reward_model:
-                gold_model = trainer.accelerator.prepare_model(gold_model)
             rewards = rew_fn(texts)
             rewards = [rewards[i] for i in range(0, len(rewards))]
             torch.cuda.empty_cache()
-            
+
             ### Reprocess query tensors
             query_tensors = query_tensors.input_ids
             query_tensors = [query_tensors[i] for i in range(0, len(query_tensors))]
         else:
             query_tensors, response_tensors, rewards = [], [], []
-        
+        return batch, query_tensors, response_tensors, rewards
+    
+    @empty_cache_decorator
+    @torch.no_grad()
+    def process_pref_batch(pref_batch):
         if pref_batch is not None:
             ### Process preference dataset
             pref_query = tokenizer(pref_batch["query"], padding=True, truncation=True, max_length=128, return_tensors='pt').input_ids
@@ -401,29 +445,86 @@ def main(_):
             pref_response_tensors = accelerate.utils.send_to_device(pref_response_tensors, trainer.accelerator.device)
             
             pref_texts = pref_batch["text"]
-            
-            if FLAGS.use_gold_reward_model and batch is None: # Need to move to gpu
-                gold_model = trainer.accelerator.prepare_model(gold_model)
             pref_rewards = rew_fn(pref_texts)
             
             # now append the preference dataset to the batch
-            query_tensors.extend([pref_query_tensors[i] for i in range(0, len(pref_query_tensors))])
-            response_tensors.extend([pref_response_tensors[i] for i in range(0, len(pref_response_tensors))])
-            rewards.extend([pref_rewards[i] for i in range(0, len(pref_rewards))])
+            query_tensors = [pref_query_tensors[i] for i in range(0, len(pref_query_tensors))]
+            response_tensors = [pref_response_tensors[i] for i in range(0, len(pref_response_tensors))]
+            rewards = [pref_rewards[i] for i in range(0, len(pref_rewards))]
+        else:
+            query_tensors, response_tensors, rewards = [], [], []
+        return pref_batch, query_tensors, response_tensors, rewards
+
+    print("Starting training")
+    total_iterations = 0
+    for epoch in tqdm(range(FLAGS.num_train_epochs), desc="Epochs"):
+        for sub_iteration, batches in tqdm(enumerate(zipped_dataloaders), desc="Batches", total=len(zipped_dataloaders)):
+            if isinstance(batches, tuple) and len(batches) == 2:
+                batch, pref_batch = batches
+            else:
+                if batch_size_online_data == 0:
+                    batch, pref_batch = None, batches
+                elif batch_size_pref_data == 0:
+                    batch, pref_batch = batches, None
             
-        if FLAGS.use_gold_reward_model:
-            gold_model.to(torch.device("cpu"))
+            if FLAGS.use_gold_reward_model:
+                gold_model = trainer.accelerator.prepare_model(gold_model)
+            
+            batch, query_tensors, response_tensors, rewards = process_batch(batch) # generate using sft model
+            pref_batch, pref_query_tensors, pref_response_tensors, pref_rewards = process_pref_batch(pref_batch) # use pref data completions
+            query_tensors, response_tensors, rewards = query_tensors + pref_query_tensors, response_tensors + pref_response_tensors, rewards + pref_rewards
+            
+            des_len = len(rewards)
+            columns_to_log: list[str] = ["query", "response"]
+            
+            output_batch = {}
+            for k in columns_to_log:
+                output_batch[k] = (batch or {}).get(k, []) + (pref_batch or {}).get(k, [])
+                assert len(output_batch[k]) == des_len, f"len({k}) = {len(output_batch[k])} != {des_len}, {output_batch[k]}"
 
-        #### Run RBC step
-        stats = trainer.step(query_tensors, response_tensors, rewards)
-        trainer.log_stats(stats, batch or {}, rewards)
-        
-        if epoch > 0 and epoch > last_epoch:
-            save_model(model_name + f"_epoch_{epoch}", epoch)
-            last_epoch = epoch
+            if FLAGS.use_gold_reward_model:
+                gold_model.to(torch.device("cpu"))
 
-    #### Save model
-    save_model(model_name, -1)
+            #### Run Trainer step
+            stats = trainer.step(query_tensors, response_tensors, rewards)
+            stats = {}
+  
+            if total_iterations % FLAGS.eval_every_steps == 0:
+                if FLAGS.use_gold_reward_model:
+                    gold_model = trainer.accelerator.prepare_model(gold_model)
+                    
+                #### Calculate rewards with train and eval datasets
+                for eval_name, eval_dataloader in all_eval_dataloaders.items():
+                    print(f"Running evaluation on {eval_name}")
+                    batch, _, _, eval_rewards = process_batch(next(iter(eval_dataloader)))
+                    eval_rewards = torch.stack(eval_rewards, dim=0)
+                    eval_rewards = eval_rewards.cpu().numpy()
+                    
+                    # log reward stats
+                    stats[f"{eval_name}/rewards"] = eval_rewards.mean()
+                    stats[f"{eval_name}/rewards_mean"] = eval_rewards.mean()
+                    stats[f"{eval_name}/rewards_std"] = eval_rewards.std()
+                    stats[f"{eval_name}/rewards_max"] = eval_rewards.max()
+                    stats[f"{eval_name}/rewards_min"] = eval_rewards.min()
+                    stats[f"{eval_name}/rewards_median"] = np.median(eval_rewards)
+
+                    # log table of completions
+                    table_rows = list(r for r in zip(*[batch[col] for col in columns_to_log], eval_rewards.tolist()))
+                    stats[f"{eval_name}/table"] = wandb.Table(columns=[*columns_to_log, "reward"], rows=table_rows)
+
+                if FLAGS.use_gold_reward_model:
+                    gold_model = trainer.accelerator.prepare_model(gold_model)
+                
+                save_model(model_name + f"iteration_{total_iterations}", epoch)
+            
+            stats['epoch'] = epoch + sub_iteration/len(zipped_dataloaders)
+            trainer.log_stats(
+                stats=stats,
+                batch=output_batch,
+                rewards=rewards,
+                columns_to_log=columns_to_log
+            )
+        save_model(model_name + f"_epoch_{epoch}", epoch)
 
 if __name__ == "__main__":
     app.run(main)

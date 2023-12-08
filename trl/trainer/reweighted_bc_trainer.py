@@ -1192,7 +1192,6 @@ class ReweightedBCTrainer(BaseTrainer):
         batch: dict,
         rewards: List[torch.FloatTensor],
         columns_to_log: List[str] = ["query", "response"],
-        true_rewards: Optional[List[torch.FloatTensor]] = None,
     ):
         """
         A function that logs all the training stats. Call it at the end of each epoch.
@@ -1212,9 +1211,6 @@ class ReweightedBCTrainer(BaseTrainer):
             # Log stats
             if not isinstance(rewards, torch.Tensor):
                 rewards = torch.tensor(rewards).to(self.current_device)
-            if true_rewards is not None:
-                if not isinstance(true_rewards, torch.Tensor):
-                    true_rewards = torch.tensor(true_rewards).to(self.current_device)
 
             if "query" not in batch.keys() and "response" not in batch.keys():
                 # warn the user that the game logs will not be logged
@@ -1252,14 +1248,10 @@ class ReweightedBCTrainer(BaseTrainer):
                 if isinstance(v, torch.Tensor) and v.dtype == torch.bfloat16:
                     logs[k] = v.float()
 
-            logs["env/reward_mean"] = torch.mean(rewards).cpu().numpy().item()
-            logs["env/reward_std"] = torch.std(rewards).cpu().numpy().item()
-            logs["env/reward_dist"] = rewards.cpu().numpy()
-            
-            if true_rewards is not None:
-                logs["env/true_reward_mean"] = torch.mean(true_rewards).cpu().numpy().item()
-                logs["env/true_reward_std"] = torch.std(true_rewards).cpu().numpy().item()
-                logs["env/true_reward_dist"] = true_rewards.cpu().numpy()
+            logs["dataset/reward_mean"] = torch.mean(rewards).cpu().numpy().item()
+            logs["dataset/reward_std"] = torch.std(rewards).cpu().numpy().item()
+            logs["dataset/reward_dist"] = rewards.cpu().numpy()
+
 
             if self.config.log_with == "tensorboard":
                 # update the current step

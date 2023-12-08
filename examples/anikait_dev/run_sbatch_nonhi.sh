@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --partition=iris-hi # Run on IRIS nodes, optionally iris-hi
+#SBATCH --partition=iris # Run on IRIS nodes, optionally iris-hi
 #SBATCH --time=120:00:00 # Max job length is 5 days
 #SBATCH --nodes=1 # Only use one node (machine)
 #SBATCH --cpus-per-task=16 # Request 8 CPUs for this task
