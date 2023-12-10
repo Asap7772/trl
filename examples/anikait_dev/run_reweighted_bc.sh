@@ -4,7 +4,7 @@ export PYTHONPATH=/iris/u/asap7772/trl:$PYTHONPATH
 
 mix_ratios=(1.0) # fully preference data
 use_gold_rews=(true)
-wandb_project="reweighted_bc_score_norm_tempablation_dualgpu"
+wandb_project="reweighted_bc_score_norm_tempablation_1210"
 dryrun=false
 debug=false
 which_exp=${1:--1}
@@ -33,7 +33,7 @@ for temperature in "${temperatures[@]}"; do
         --temperature ${temperature} \
         --use_score_scaling True \
         --use_score_norm True \
-        --gradient_accumulation_steps 2 \
+        --gradient_accumulation_steps 4 \
     "
 
     if [[ $use_gold_rew = true ]]; then
@@ -52,4 +52,4 @@ for temperature in "${temperatures[@]}"; do
 
 done
 done
-done
+done    

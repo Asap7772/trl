@@ -1,4 +1,5 @@
 export PYTHONPATH=/iris/u/asap7772/trl:$PYTHONPATH
-# python /iris/u/asap7772/trl/examples/anikait_dev/sft.py --dataset_path "tatsu-lab/alpaca_farm" --pretrained_dir="EleutherAI/pythia-1.4b" --output_dir="/iris/u/asap7772/trl/sft_promptfix_checkpoints"
-# python /iris/u/asap7772/trl/examples/anikait_dev/sft.py --dataset_path "/iris/u/asap7772/conservative_reward_model/data_trl/relabeled_alpacafarm_pythiasft_20K_preference_data" --pretrained_dir="/iris/u/asap7772/trl/output_checkpoints/checkpoint-7500" --output_dir="/iris/u/asap7772/trl/sft_best_preference"
-python /iris/u/asap7772/trl/examples/anikait_dev/sft.py --dataset_path "/iris/u/asap7772/conservative_reward_model/data_trl_multipreference_rerun/multipreference_relabelled" --pretrained_dir="/iris/u/asap7772/trl/output_checkpoints/checkpoint-7500" --output_dir="/iris/u/asap7772/trl/sft_best_preference_multi"
+python /iris/u/asap7772/trl/examples/anikait_dev/sft.py \
+--dataset_path "tatsu-lab/alpaca_farm" \
+--pretrained_dir="EleutherAI/pythia-1.4b" \
+--output_dir="/iris/u/asap7772/trl/exp_checkpoints/mistral_test_tpu"
