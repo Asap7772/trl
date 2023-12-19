@@ -4,9 +4,9 @@ export PYTHONPATH=/iris/u/asap7772/trl:$PYTHONPATH
 
 mix_ratios=(1.0) # fully preference data
 use_gold_rews=(true)
-wandb_project="reweighted_bc_score_norm_tempablation_1210"
+wandb_project="12_16_reweighted_bc_4inner_largerbatch_norescale"
 dryrun=false
-debug=false
+debug=true
 which_exp=${1:--1}
 temperatures=(1.0 2.0 5.0 10.0 20.0 50.0)
 
@@ -25,15 +25,18 @@ for temperature in "${temperatures[@]}"; do
 
     echo "mix_ratio: $mix_ratio"
     echo "use_gold_rew: $use_gold_rew"
+    echo "temperature: $temperature"
 
     command="python /iris/u/asap7772/trl/examples/anikait_dev/reweighted_bc.py \
         --wandb_project $wandb_project \
         --run_name reweighted_bc_usegoldrew${use_gold_rew}_mixratio${mix_ratio}_temp${temperature} \
         --mixing_ratio ${mix_ratio} \
         --temperature ${temperature} \
-        --use_score_scaling True \
-        --use_score_norm True \
-        --gradient_accumulation_steps 4 \
+        --use_score_scaling False \
+        --use_score_norm False \
+        --gradient_accumulation_steps 8 \
+        --mini_batch_size 16 \
+        --batch_size 128
     "
 
     if [[ $use_gold_rew = true ]]; then

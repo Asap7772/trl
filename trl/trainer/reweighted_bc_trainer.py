@@ -605,7 +605,7 @@ class ReweightedBCTrainer(BaseTrainer):
             `dict[str, Any]`: A summary of the training statistics
         """
         bs = self.config.batch_size
-
+        breakpoint()
         queries, responses, scores, response_masks = self._step_safety_checker(
             bs, queries, responses, scores, response_masks
         )
@@ -618,7 +618,7 @@ class ReweightedBCTrainer(BaseTrainer):
             if self.config.use_score_norm:
                 scores = (scores - self.running.mean.to(**tensor_to_kwargs)) / score_scaling_factor
             else:
-                scores /= score_scaling_factor
+                scores /= {score_scaling_factor}
 
         if self.config.score_clip is not None:
             # Score clipping
@@ -713,6 +713,8 @@ class ReweightedBCTrainer(BaseTrainer):
             "scores": scores.to(torch.float32),
         }
         batch_dict.update(model_inputs)
+        
+        breakpoint()
 
         t = time.time()
         all_stats = []
@@ -1040,6 +1042,7 @@ class ReweightedBCTrainer(BaseTrainer):
             scores (`torch.FloatTensor`):
                 Scores from the reward model, shape (`batch_size`)
         """
+        breakpoint()
         unweighted_nll_loss = masked_mean(-logprobs, mask)
         
         batch_mask=None
@@ -1108,6 +1111,10 @@ class ReweightedBCTrainer(BaseTrainer):
                 scores_std=scores.std().detach(),
                 scores_min=scores.min().detach(),
                 scores_max=scores.max().detach(),
+                reweight_scores_mean=reweight_scores.mean().detach(),
+                reweight_scores_std=reweight_scores.std().detach(),
+                reweight_scores_min=reweight_scores.min().detach(),
+                reweight_scores_max=reweight_scores.max().detach(),
             ),
             policy=dict(
                 entropy=entropy.detach(),

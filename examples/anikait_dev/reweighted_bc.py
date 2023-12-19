@@ -34,8 +34,8 @@ flags.DEFINE_string('pretrained_dir', "/iris/u/asap7772/trl/output_checkpoints/c
 flags.DEFINE_string('reward_model', "/iris/u/asap7772/conservative_reward_model/data/exp_checkpoints/model_checkpoints_rewpref/rewpref_fixpad_labnoise_14m_1127/EleutherAI_pythia-14m_relabeled_alpacafarm_pythiasft_20K_preference_data_19000_0.0_1e-05_0.0/20231127-120834/epoch_5/", 'the path to the reward model')
 flags.DEFINE_float('learning_rate', 1.0e-6, 'the learning rate')
 flags.DEFINE_float('cosine_annealing_lr_eta_min', 1.0e-7, 'the cosine annealing eta min')
-flags.DEFINE_integer('num_train_epochs', 10, 'the number of training epochs')
-flags.DEFINE_integer('inner_iteration_steps', 4, 'the number of training epochs')
+flags.DEFINE_integer('num_train_epochs', 50, 'the number of training epochs')
+flags.DEFINE_integer('inner_iteration_steps', 1, 'the number of training epochs')
 flags.DEFINE_integer('eval_every_steps', 10, 'how often to evaluate')
 flags.DEFINE_integer('num_eval_batches', 8, 'the number of evaluation batches of size gold shard size')
 flags.DEFINE_float('clip_range', 0.2, 'the clip range')
@@ -507,7 +507,7 @@ def main(_):
             
             if FLAGS.use_gold_reward_model:
                 gold_model = trainer.accelerator.prepare_model(gold_model)
-            
+
             batch, query_tensors, response_tensors, rewards = process_batch(batch) # generate using sft model
             pref_batch, pref_query_tensors, pref_response_tensors, pref_rewards = process_pref_batch(pref_batch) # use pref data completions
             query_tensors, response_tensors, rewards = query_tensors + pref_query_tensors, response_tensors + pref_response_tensors, rewards + pref_rewards
@@ -525,7 +525,6 @@ def main(_):
 
             #### Run Trainer step
             stats = trainer.step(query_tensors, response_tensors, rewards)
-            stats = {}
   
             if total_iterations % FLAGS.eval_every_steps == 0:
                 if FLAGS.use_gold_reward_model:
@@ -563,7 +562,7 @@ def main(_):
                 if FLAGS.use_gold_reward_model:
                     gold_model = trainer.accelerator.prepare_model(gold_model)
                 
-                save_model(model_name + f"iteration_{total_iterations}", epoch)
+                # save_model(model_name + f"iteration_{total_iterations}", epoch)
             
             stats['epoch'] = epoch + sub_iteration/len(zipped_dataloaders)
             total_iterations += 1
