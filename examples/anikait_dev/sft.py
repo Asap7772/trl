@@ -108,7 +108,7 @@ def main(_):
         )
         print('Loaded dataset', dataset_name)
         dataset, eval_dataset = dataset['train'], dataset['test']
-    tokenizer = AutoTokenizer.from_pretrained(FLAGS.pretrained_dir)
+    tokenizer = AutoTokenizer.from_pretrained(FLAGS.pretrained_dir, trust_remote_code=True)
     tokenizer.pad_token = tokenizer.eos_token
     eos = tokenizer.eos_token
 
@@ -118,7 +118,7 @@ def main(_):
             for i in range(len(example['instruction'])):
                 inst, inp, out = example['instruction'][i], example['input'][i], example['output'][i]
                 if inp:
-                    text = f"{PROMPT_TOKEN}{inst}\n{inp}{eos}{ASSISTANT_TOKEN}{out}{eos}"
+                    text = f"{PROMPT_TOKEN} {inst}\n{inp}{eos}{ASSISTANT_TOKEN}{out}{eos}"
                 else:
                     text = f"{PROMPT_TOKEN}{inst}{eos}{ASSISTANT_TOKEN}{out}{eos}"
                 output_texts.append(text)
@@ -128,7 +128,7 @@ def main(_):
             # return example['y_w']
             return example['y_1']
 
-    model = AutoModelForCausalLM.from_pretrained(FLAGS.pretrained_dir)
+    model = AutoModelForCausalLM.from_pretrained(FLAGS.pretrained_dir, trust_remote_code=True)
     instruction_template = PROMPT_TOKEN
     response_template = ASSISTANT_TOKEN
     collator = DataCollatorForCompletionOnlyLM(
