@@ -6,6 +6,10 @@ import os
 os.environ["WANDB__SERVICE_WAIT"] = "600"
 os.environ["WANDB_INIT_TIMEOUT"] = "600"
 
+os.environ["KAGGLE_TPU"] = "yes" # adding a fake env to launch on TPUs
+os.environ["TPU_NAME"] = "dummy"
+os.environ["XRT_TPU_CONFIG"]="localservice;0;localhost:51011"
+
 import re
 from datasets import concatenate_datasets, load_from_disk, Dataset, DatasetDict, load_dataset
 from trl import SFTTrainer, DataCollatorForCompletionOnlyLM
@@ -130,7 +134,8 @@ def main(_):
     collator = DataCollatorForCompletionOnlyLM(
         response_template=response_template,
         instruction_template=instruction_template,
-        tokenizer=tokenizer
+        tokenizer=tokenizer,
+        pad_to_multiple_of=FLAGS.max_seq_length, # seems to be necessary for TPU to ensure batches are the same size 
     )
 
     extra_kwargs = {}

@@ -14,7 +14,7 @@
 import dataclasses
 import warnings
 from functools import wraps
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -119,7 +119,7 @@ class SFTTrainer(Trainer):
         callbacks: Optional[List[TrainerCallback]] = None,
         optimizers: Tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LambdaLR] = (None, None),
         preprocess_logits_for_metrics: Optional[Callable[[torch.Tensor, torch.Tensor], torch.Tensor]] = None,
-        peft_config: Optional[PeftConfig] = None,
+        peft_config: Optional[Any] = None,
         dataset_text_field: Optional[str] = None,
         packing: Optional[bool] = False,
         formatting_func: Optional[Callable] = None,
@@ -257,6 +257,12 @@ class SFTTrainer(Trainer):
             self.model = self._activate_neftune(self.model)
 
         output = super().train(*args, **kwargs)
+        
+        try:
+            import torch_xla.debug.metrics as met
+            print(met.short_metrics_report())
+        except:
+            pass
 
         # After training we make sure to retrieve back the original forward pass method
         # for the embedding layer by removing the forward post hook.

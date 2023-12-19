@@ -1,4 +1,10 @@
-export PYTHONPATH=/iris/u/asap7772/trl:$PYTHONPATH
-# python /iris/u/asap7772/trl/examples/anikait_dev/sft.py --dataset_path "tatsu-lab/alpaca_farm" --pretrained_dir="EleutherAI/pythia-1.4b" --output_dir="/iris/u/asap7772/trl/sft_promptfix_checkpoints"
-# python /iris/u/asap7772/trl/examples/anikait_dev/sft.py --dataset_path "/iris/u/asap7772/conservative_reward_model/data_trl/relabeled_alpacafarm_pythiasft_20K_preference_data" --pretrained_dir="/iris/u/asap7772/trl/output_checkpoints/checkpoint-7500" --output_dir="/iris/u/asap7772/trl/sft_best_preference"
-python /iris/u/asap7772/trl/examples/anikait_dev/sft.py --dataset_path "/iris/u/asap7772/conservative_reward_model/data_trl_multipreference_rerun/multipreference_relabelled" --pretrained_dir="/iris/u/asap7772/trl/output_checkpoints/checkpoint-7500" --output_dir="/iris/u/asap7772/trl/sft_best_preference_multi"
+export PJRT_DEVICE=TPU
+export WANDB_PROJECT=sft_tpu
+export WANDB_NAME=sft_tpu_test
+# TPU specific flags to improve training throughput
+# export LIBTPU_INIT_ARGS='--xla_jf_spmd_threshold_for_windowed_einsum_mib=0 --xla_tpu_spmd_threshold_for_allgather_cse=10000 --xla_tpu_spmd_rewrite_einsum_with_reshape=true --xla_enable_async_all_gather=true --jax_enable_async_collective_offload=true --xla_tpu_enable_latency_hiding_scheduler=true TPU_MEGACORE=MEGACORE_DENSE'
+export PYTHONPATH=/home/anikaitsingh/trl:$PYTHONPATH
+python /home/anikaitsingh/trl/examples/anikait_dev/sft.py \
+--dataset_path "tatsu-lab/alpaca_farm" \
+--pretrained_dir="EleutherAI/pythia-1.4b" \
+--output_dir="/home/anikaitsingh/trl/exp_checkpoints/mistral_test_tpu"
