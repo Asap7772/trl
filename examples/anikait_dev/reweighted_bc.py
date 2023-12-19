@@ -34,14 +34,14 @@ flags.DEFINE_string('pretrained_dir', "/iris/u/asap7772/trl/output_checkpoints/c
 flags.DEFINE_string('reward_model', "/iris/u/asap7772/conservative_reward_model/data/exp_checkpoints/model_checkpoints_rewpref/rewpref_fixpad_labnoise_14m_1127/EleutherAI_pythia-14m_relabeled_alpacafarm_pythiasft_20K_preference_data_19000_0.0_1e-05_0.0/20231127-120834/epoch_5/", 'the path to the reward model')
 flags.DEFINE_float('learning_rate', 1.0e-6, 'the learning rate')
 flags.DEFINE_float('cosine_annealing_lr_eta_min', 1.0e-7, 'the cosine annealing eta min')
-flags.DEFINE_integer('num_train_epochs', 10, 'the number of training epochs')
-flags.DEFINE_integer('inner_iteration_steps', 4, 'the number of training epochs')
+flags.DEFINE_integer('num_train_epochs', 50, 'the number of training epochs')
+flags.DEFINE_integer('inner_iteration_steps', 1, 'the number of training epochs')
 flags.DEFINE_integer('eval_every_steps', 10, 'how often to evaluate')
 flags.DEFINE_integer('num_eval_batches', 8, 'the number of evaluation batches of size gold shard size')
 flags.DEFINE_float('clip_range', 0.2, 'the clip range')
 flags.DEFINE_float('gae_lambda', 0.95, 'the GAE lambda')
-flags.DEFINE_integer('batch_size', 256, 'the batch size')
-flags.DEFINE_integer('max_gen_batch_size', 16, 'the max generation batch size')
+flags.DEFINE_integer('batch_size', 64, 'the batch size')
+flags.DEFINE_integer('max_gen_batch_size', 8, 'the max generation batch size')
 flags.DEFINE_integer('mini_batch_size', 8, 'the chunk size')
 flags.DEFINE_integer('seed', 42, 'the random seed')
 flags.DEFINE_integer('gradient_accumulation_steps', 1, 'the gradient accumulation steps')
@@ -72,6 +72,7 @@ flags.DEFINE_string('gold_reward_model_path', '/iris/u/asap7772/downloaded_model
 flags.DEFINE_integer('gold_shard_size', 8, 'the number of shards to use for gold reward model')
 flags.DEFINE_string('sft10k_path', '/iris/u/asap7772/downloaded_models/sft10k', 'the path to the sft10k model')
 flags.DEFINE_bool('flash_attn', False, 'whether to use flash attention')
+flags.DEFINE_string('cache_dir', '/iris/u/asap7772/.cache', 'the cache directory')
 
 def get_dataset(path, num_samples=-1, return_test_data=True, num_samples_test=1000):
     assert os.path.exists(path)
@@ -230,7 +231,13 @@ def main(_):
     tokenizer.padding_side = "left"
     tokenizer.truncation_side = "left"
     eos = tokenizer.eos_token
-    policy = AutoModelForCausalLM.from_pretrained(FLAGS.pretrained_dir)
+    policy = AutoModelForCausalLM.from_pretrained(
+        FLAGS.pretrained_dir,
+        cache_dir=FLAGS.cache_dir, 
+        torch_dtype=torch.float32,
+        low_cpu_mem_usage=True,
+        device_map='auto'
+    )
     policy.resize_token_embeddings(len(tokenizer))
     model = AutoModelForCausalLMWithValueHead(policy)
 
@@ -267,7 +274,13 @@ def main(_):
         "use_cache": True, # whether or not the model should use the past key/values attentions (if the model supports it)
     }
     
-    reward_model = AutoModelForSequenceClassification.from_pretrained(FLAGS.reward_model)
+    reward_model = AutoModelForSequenceClassification.from_pretrained(
+        FLAGS.reward_model,
+        cache_dir=FLAGS.cache_dir, 
+        torch_dtype=torch.float32,
+        low_cpu_mem_usage=True,
+        device_map='auto'
+    )
     reward_tokenizer = AutoTokenizer.from_pretrained(FLAGS.reward_model)
     if not FLAGS.use_gold_reward_model:
         reward_model = trainer.accelerator.prepare_model(reward_model)
@@ -297,12 +310,13 @@ def main(_):
 
     gold_tokenizer = AutoTokenizer.from_pretrained(FLAGS.gold_reward_model_path)
 
+
     gold_model = RewardModel.from_pretrained(
         FLAGS.gold_reward_model_path,
         flash_attn=FLAGS.flash_attn,
         mixed_precision=True,
         torch_dtype=torch.float16,
-        cache_dir=None,
+        cache_dir=FLAGS.cache_dir,
         low_cpu_mem_usage=True,
         config=RewardConfig(backbone_model_name_or_path=FLAGS.sft10k_path),
     )
@@ -445,11 +459,8 @@ def main(_):
             response_tensors = [response_tensors[i] for i in range(0, len(response_tensors))]
 
             #### Compute reward score
-            empty_cache()
             rewards = rew_fn(texts)
             rewards = [rewards[i] for i in range(0, len(rewards))]
-            empty_cache()
-
             ### Reprocess query tensors
             query_tensors = query_tensors.input_ids
             query_tensors = [query_tensors[i] for i in range(0, len(query_tensors))]
@@ -469,10 +480,8 @@ def main(_):
             pref_response_tensors = accelerate.utils.send_to_device(pref_response_tensors, trainer.accelerator.device)
             
             #### Compute reward score
-            empty_cache()
             pref_texts = pref_batch["text"]
             pref_rewards = rew_fn(pref_texts)
-            empty_cache()
             
             # now append the preference dataset to the batch
             query_tensors = [pref_query_tensors[i] for i in range(0, len(pref_query_tensors))]
@@ -486,6 +495,8 @@ def main(_):
     total_iterations = 0
     for epoch in tqdm(range(FLAGS.num_train_epochs), desc="Epochs"):
         for sub_iteration, batches in tqdm(enumerate(zipped_dataloaders), desc="Batches", total=len(zipped_dataloaders)):
+            empty_cache()
+
             if isinstance(batches, tuple) and len(batches) == 2:
                 batch, pref_batch = batches
             else:
@@ -496,7 +507,7 @@ def main(_):
             
             if FLAGS.use_gold_reward_model:
                 gold_model = trainer.accelerator.prepare_model(gold_model)
-            
+
             batch, query_tensors, response_tensors, rewards = process_batch(batch) # generate using sft model
             pref_batch, pref_query_tensors, pref_response_tensors, pref_rewards = process_pref_batch(pref_batch) # use pref data completions
             query_tensors, response_tensors, rewards = query_tensors + pref_query_tensors, response_tensors + pref_response_tensors, rewards + pref_rewards
@@ -514,7 +525,6 @@ def main(_):
 
             #### Run Trainer step
             stats = trainer.step(query_tensors, response_tensors, rewards)
-            stats = {}
   
             if total_iterations % FLAGS.eval_every_steps == 0:
                 if FLAGS.use_gold_reward_model:
@@ -523,10 +533,19 @@ def main(_):
                 #### Calculate rewards with train and eval datasets
                 for eval_name, eval_dataloader in all_eval_dataloaders.items():
                     print(f"Running evaluation on {eval_name}")
-                    batch, _, _, eval_rewards = process_batch(next(iter(eval_dataloader)))
-                    empty_cache()
-                    eval_rewards = torch.stack(eval_rewards, dim=0)
-                    eval_rewards = eval_rewards.cpu().numpy()
+                    batch = next(iter(eval_dataloader))
+                    all_rewards = []
+                    all_to_log = {}
+                    for i in range(FLAGS.num_eval_batches):
+                        sbatch = {k: batch[k][i*FLAGS.gold_shard_size:(i+1)*FLAGS.gold_shard_size] for k in batch}
+                        sbatch, query_tensors, response_tensors, eval_rewards = process_batch(sbatch)
+                        all_rewards.extend([x.cpu().numpy() for x in eval_rewards])
+                        for k in columns_to_log:
+                            all_to_log[k] = (all_to_log.get(k, []) + [x.cpu().numpy().item() if isinstance(x, torch.Tensor) else x for x in sbatch[k]])
+                        del sbatch, query_tensors, response_tensors, eval_rewards
+                        empty_cache()
+
+                    eval_rewards = np.array(all_rewards)
                     
                     # log reward stats
                     stats[f"{eval_name}/rewards"] = eval_rewards.mean()
@@ -537,15 +556,16 @@ def main(_):
                     stats[f"{eval_name}/rewards_median"] = np.median(eval_rewards)
 
                     # log table of completions
-                    table_rows = list(r for r in zip(*[batch[col] for col in columns_to_log], eval_rewards.tolist()))
+                    table_rows = list(r for r in zip(*[all_to_log[col] for col in columns_to_log], eval_rewards.tolist()))
                     stats[f"{eval_name}/table"] = wandb.Table(columns=[*columns_to_log, "reward"], rows=table_rows)
 
                 if FLAGS.use_gold_reward_model:
                     gold_model = trainer.accelerator.prepare_model(gold_model)
                 
-                save_model(model_name + f"iteration_{total_iterations}", epoch)
+                # save_model(model_name + f"iteration_{total_iterations}", epoch)
             
             stats['epoch'] = epoch + sub_iteration/len(zipped_dataloaders)
+            total_iterations += 1
             trainer.log_stats(
                 stats=stats,
                 batch=output_batch,
