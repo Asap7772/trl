@@ -247,6 +247,7 @@ def main(_):
         tracker_project_name=FLAGS.wandb_project,
         use_score_scaling=FLAGS.use_score_scaling,
         use_score_norm=FLAGS.use_score_norm,
+        optimize_cuda_cache=True,
         filter_or_reweight=FLAGS.filter_or_reweight,
         temperature=FLAGS.temperature,
         weighting_type=FLAGS.weighting_type,

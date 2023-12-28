@@ -23,6 +23,8 @@ import tempfile
 from tqdm import tqdm
 import wandb
 import re
+from collections import defaultdict
+from functools import reduce
 
 FLAGS = flags.FLAGS
 flags.DEFINE_string('wandb_project', 'ppo_rew_padfix_rew', 'the wandb project name')
@@ -45,12 +47,13 @@ flags.DEFINE_integer('max_gen_batch_size', 16, 'the max generation batch size')
 flags.DEFINE_integer('mini_batch_size', 8, 'the chunk size')
 flags.DEFINE_integer('seed', 42, 'the random seed')
 flags.DEFINE_integer('gradient_accumulation_steps', 1, 'the gradient accumulation steps')
-
 # score manipulation
 flags.DEFINE_bool('use_score_scaling', False, 'whether to use score scaling')
 flags.DEFINE_bool('use_score_norm', False, 'whether to use score normalization')
 # flags for preference dataset
-flags.DEFINE_string('preference_dataset_path', '/iris/u/asap7772/conservative_reward_model/data/preference_datasets/relabeled_alpacafarm_pythiasft_20K_preference_data', 'the path to the preference dataset')
+flags.DEFINE_string('preference_dataset_path', 'tatsu-lab/alpaca_farm', 'the path to the preference dataset')
+flags.DEFINE_string("preference_dataset_subset", "alpaca_human_preference", "Dataset name")
+flags.DEFINE_string("preference_dataset_split", "preference", "Dataset name")
 flags.DEFINE_integer('preference_num_samples', 19000, 'the number of samples to use from the preference dataset')
 flags.DEFINE_bool("batched", True, "Whether to use batched processing")
 flags.DEFINE_integer("num_proc", 32, "Number of processes to use")
@@ -61,6 +64,9 @@ flags.DEFINE_string('gold_reward_model_path', '/iris/u/asap7772/downloaded_model
 flags.DEFINE_integer('gold_shard_size', 8, 'the number of shards to use for gold reward model')
 flags.DEFINE_string('sft10k_path', '/iris/u/asap7772/downloaded_models/sft10k', 'the path to the sft10k model')
 flags.DEFINE_bool('flash_attn', False, 'whether to use flash attention')
+flags.DEFINE_string('cache_dir', '/nfs/iris_nfs/users/asap7772/.cache', 'the cache directory')
+# flags for tpu
+flags.DEFINE_bool('use_tpu', False, 'whether to use tpus')
 
 def get_dataset(path, num_samples=-1, return_test_data=True, num_samples_test=1000):
     assert os.path.exists(path)
@@ -140,8 +146,39 @@ def main(_):
     batch_size_online_data = FLAGS.batch_size - batch_size_pref_data
     
     if FLAGS.preference_dataset_path == "tatsu-lab/alpaca_farm":
-        pref_dataset = load_dataset(FLAGS.preference_dataset_path, split="sft")
-        eval_pref_dataset = load_dataset(FLAGS.preference_dataset_path, split="preference")
+        pref_dataset = load_dataset(FLAGS.preference_dataset_path, FLAGS.preference_dataset_subset, split="preference")
+        pref_dataset = pref_dataset.train_test_split(test_size=0.1, seed=FLAGS.seed)
+        
+        PROMPT_TOKEN = '<|prompter|>'
+        ASSISTANT_TOKEN = '<|assistant|>'
+        EOS_TOKEN = '<|endoftext|>'
+        def process_dataset(batch):
+            new_batch = defaultdict(list)
+            for inst, inp, out1, out2, pref in zip(batch['instruction'], batch['input'], batch['output_1'], batch['output_2'], batch['preference']):
+                if pref == 1:
+                    selected = out1
+                    rejected = out2
+                else:
+                    selected = out2
+                    rejected = out1
+                if inp:
+                    text = f"{PROMPT_TOKEN}{inst}\n{inp}{EOS_TOKEN}{ASSISTANT_TOKEN}"
+                else:
+                    text = f"{PROMPT_TOKEN}{inst}{EOS_TOKEN}{ASSISTANT_TOKEN}"
+                
+                new_batch['prompt'].append(text)
+                new_batch['y_w'].append(f"{text}{selected}{EOS_TOKEN}")
+                new_batch['y_l'].append(f"{text}{rejected}{EOS_TOKEN}")
+            return new_batch
+        
+        pref_dataset = pref_dataset.map(
+            process_dataset,
+            batched=FLAGS.batched,
+            num_proc=FLAGS.num_proc,
+        )
+        
+        pref_dataset, eval_pref_dataset = pref_dataset['train'], pref_dataset['test']
+        remove_columns = ['instruction', 'input', 'output_1', 'output_2', 'preference', 'raw_preference', 'prompt', 'y_w', 'y_l']
     else:
         pref_dataset_name, pref_dataset = construct_dataset(
             path=FLAGS.preference_dataset_path,
@@ -150,15 +187,22 @@ def main(_):
         )
         print('Loaded dataset', pref_dataset_name)
         pref_dataset, eval_pref_dataset = pref_dataset['train'], pref_dataset['test']
-    
+        remove_columns = ['output', 'text', 'alpaca_text', 'y_ref', 'y_1', 'y_2', 'y_w', 'y_w_alpaca', 'y_l', 'y_l_alpaca', 'y_w_score', 'y_l_score', 'score_diff', 'prompt', 'alpaca_prompt']
+
+
     def process_dataset(batch):
         new_batch = {}
         new_batch['query'] = batch['prompt'] + batch['prompt']
         new_batch['text'] =  batch['y_w'] + batch['y_l']
         new_batch['response'] = [x.split(ASSISTANT_TOKEN)[-1] for x in batch['y_w'] + batch['y_l']]
+        
+        shapes = {}
+        for k, v in new_batch.items():
+            shapes[k] = len(v)
+        if reduce(lambda x,y: x if x==y else -1, list(shapes.values())) == -1:
+            assert False, f"Shapes of all columns must be equal, but got {shapes}, {list(shapes.values())}"
         return new_batch
 
-    remove_columns = ['output', 'text', 'alpaca_text', 'y_ref', 'y_1', 'y_2', 'y_w', 'y_w_alpaca', 'y_l', 'y_l_alpaca', 'y_w_score', 'y_l_score', 'score_diff', 'prompt', 'alpaca_prompt']
 
     pref_dataset = pref_dataset.map(
         process_dataset,
@@ -191,6 +235,7 @@ def main(_):
         tracker_project_name=FLAGS.wandb_project,
         use_score_scaling=FLAGS.use_score_scaling,
         use_score_norm=FLAGS.use_score_norm,
+        optimize_cuda_cache=True,
         project_kwargs={
             'project_dir': output_dir,
         },
@@ -210,7 +255,13 @@ def main(_):
     tokenizer.padding_side = "left"
     tokenizer.truncation_side = "left"
     eos = tokenizer.eos_token
-    policy = AutoModelForCausalLM.from_pretrained(FLAGS.pretrained_dir)
+    policy = AutoModelForCausalLM.from_pretrained(
+        FLAGS.pretrained_dir,
+        cache_dir=FLAGS.cache_dir, 
+        torch_dtype=torch.float32,
+        low_cpu_mem_usage=True,
+        device_map='auto'
+    )
     policy.resize_token_embeddings(len(tokenizer))
     model = AutoModelForCausalLMWithValueHead(policy)
 
@@ -247,40 +298,51 @@ def main(_):
         "use_cache": True, # whether or not the model should use the past key/values attentions (if the model supports it)
     }
     
-    reward_model = AutoModelForSequenceClassification.from_pretrained(FLAGS.reward_model)
+    reward_model = AutoModelForSequenceClassification.from_pretrained(
+        FLAGS.reward_model,
+        cache_dir=FLAGS.cache_dir, 
+        torch_dtype=torch.float32,
+        low_cpu_mem_usage=True,
+        device_map='auto'
+    )
     reward_tokenizer = AutoTokenizer.from_pretrained(FLAGS.reward_model)
     if not FLAGS.use_gold_reward_model:
         reward_model = trainer.accelerator.prepare_model(reward_model)
     reward_model.eval()
 
     print("Loaded reward model")
+    
+    def empty_cache():
+        gc.collect()
+        if FLAGS.use_tpu:
+            return
+        torch.cuda.empty_cache()
+        gc.collect()
 
     def empty_cache_decorator(func):
         def func_wrapper(*args, **kwargs):
-            gc.collect()
-            torch.cuda.empty_cache()
-            gc.collect()
+            empty_cache()
             return func(*args, **kwargs)
         return func_wrapper
 
     @empty_cache_decorator
     @torch.no_grad()
     def get_pred_reward(text, max_len=512):
-        with torch.no_grad():
-            encoded_input = reward_tokenizer(text, padding=True, truncation=True, max_length=max_len, return_tensors='pt')
-            encoded_input = accelerate.utils.send_to_device(encoded_input, trainer.accelerator.device)
-            output = reward_model(**encoded_input)
-            logits = output.logits.squeeze()
+        encoded_input = reward_tokenizer(text, padding='max_length' if FLAGS.use_tpu else True, truncation=True, max_length=max_len, return_tensors='pt')
+        encoded_input = accelerate.utils.send_to_device(encoded_input, trainer.accelerator.device)
+        output = reward_model(**encoded_input)
+        logits = output.logits.squeeze()
         return logits
 
     gold_tokenizer = AutoTokenizer.from_pretrained(FLAGS.gold_reward_model_path)
+
 
     gold_model = RewardModel.from_pretrained(
         FLAGS.gold_reward_model_path,
         flash_attn=FLAGS.flash_attn,
         mixed_precision=True,
-        torch_dtype=torch.float16,
-        cache_dir=None,
+        torch_dtype=torch.bfloat16 if FLAGS.use_tpu else torch.float32,
+        cache_dir=FLAGS.cache_dir,
         low_cpu_mem_usage=True,
         config=RewardConfig(backbone_model_name_or_path=FLAGS.sft10k_path),
     )
@@ -297,12 +359,13 @@ def main(_):
                     end = min(beg+shard_size, len(completions))
                     tokenized_completions = gold_tokenizer(
                         completions[beg:end],
-                        padding=True,
+                        padding='max_length' if FLAGS.use_tpu else True,
+                        max_length=None,
                         truncation=True,
                         return_tensors="pt",
                     )
                     tokenized_completions = accelerate.utils.send_to_device(tokenized_completions, trainer.accelerator.device)
-                    torch.cuda.empty_cache()
+                    empty_cache()
                     scores.append(gold_model(**tokenized_completions, return_dict=False)[0])
                     pbar.update(end-beg)
                     beg = end
@@ -312,13 +375,15 @@ def main(_):
         else:
             tokenized_completions = gold_tokenizer(
                 completions,
-                padding=True,
+                padding='max_length' if FLAGS.use_tpu else True,
+                max_length=None,
                 truncation=True,
                 return_tensors="pt",
             )
             tokenized_completions = accelerate.utils.send_to_device(tokenized_completions, trainer.accelerator.device)
             scores = gold_model(**tokenized_completions, return_dict=False)
             assert concated_scores.shape[0] == len(completions) and concated_scores.ndim == 1
+            empty_cache()
             return scores
 
     
@@ -402,7 +467,7 @@ def main(_):
     def process_batch(batch):
         if batch is not None:
             #### Construct query tensors
-            query_tensors = tokenizer(batch["query"], padding=True, truncation=True, max_length=128, return_tensors='pt')
+            query_tensors = tokenizer(batch["query"], padding='max_length' if FLAGS.use_tpu else True, truncation=True, max_length=128, return_tensors='pt')
             query_tensors = accelerate.utils.send_to_device(query_tensors, trainer.accelerator.device)
 
             #### Get generations from SFTModel (including prompt)
@@ -418,14 +483,12 @@ def main(_):
 
             #### Update batch with response
             batch["response"] = [x.split(ASSISTANT_TOKEN)[-1] for x in texts]
-            response_tensors = tokenizer(batch["response"], padding=True, truncation=True, max_length=generation_kwargs['max_new_tokens'], return_tensors='pt').input_ids
+            response_tensors = tokenizer(batch["response"], padding='max_length' if FLAGS.use_tpu else True, truncation=True, max_length=generation_kwargs['max_new_tokens'], return_tensors='pt').input_ids
             response_tensors = [response_tensors[i] for i in range(0, len(response_tensors))]
 
             #### Compute reward score
             rewards = rew_fn(texts)
             rewards = [rewards[i] for i in range(0, len(rewards))]
-            torch.cuda.empty_cache()
-
             ### Reprocess query tensors
             query_tensors = query_tensors.input_ids
             query_tensors = [query_tensors[i] for i in range(0, len(query_tensors))]
@@ -438,12 +501,13 @@ def main(_):
     def process_pref_batch(pref_batch):
         if pref_batch is not None:
             ### Process preference dataset
-            pref_query = tokenizer(pref_batch["query"], padding=True, truncation=True, max_length=128, return_tensors='pt').input_ids
+            pref_query = tokenizer(pref_batch["query"], padding='max_length' if FLAGS.use_tpu else True, truncation=True, max_length=128, return_tensors='pt').input_ids
             pref_query_tensors = accelerate.utils.send_to_device(pref_query, trainer.accelerator.device)
             
-            pref_response_tensors = tokenizer(pref_batch["response"], padding=True, truncation=True, max_length=generation_kwargs['max_new_tokens'], return_tensors='pt').input_ids
+            pref_response_tensors = tokenizer(pref_batch["response"], padding='max_length' if FLAGS.use_tpu else True, truncation=True, max_length=generation_kwargs['max_new_tokens'], return_tensors='pt').input_ids
             pref_response_tensors = accelerate.utils.send_to_device(pref_response_tensors, trainer.accelerator.device)
             
+            #### Compute reward score
             pref_texts = pref_batch["text"]
             pref_rewards = rew_fn(pref_texts)
             
@@ -459,6 +523,8 @@ def main(_):
     total_iterations = 0
     for epoch in tqdm(range(FLAGS.num_train_epochs), desc="Epochs"):
         for sub_iteration, batches in tqdm(enumerate(zipped_dataloaders), desc="Batches", total=len(zipped_dataloaders)):
+            empty_cache()
+
             if isinstance(batches, tuple) and len(batches) == 2:
                 batch, pref_batch = batches
             else:
@@ -469,7 +535,7 @@ def main(_):
             
             if FLAGS.use_gold_reward_model:
                 gold_model = trainer.accelerator.prepare_model(gold_model)
-            
+
             batch, query_tensors, response_tensors, rewards = process_batch(batch) # generate using sft model
             pref_batch, pref_query_tensors, pref_response_tensors, pref_rewards = process_pref_batch(pref_batch) # use pref data completions
             query_tensors, response_tensors, rewards = query_tensors + pref_query_tensors, response_tensors + pref_response_tensors, rewards + pref_rewards
@@ -482,23 +548,32 @@ def main(_):
                 output_batch[k] = (batch or {}).get(k, []) + (pref_batch or {}).get(k, [])
                 assert len(output_batch[k]) == des_len, f"len({k}) = {len(output_batch[k])} != {des_len}, {output_batch[k]}"
 
-            if FLAGS.use_gold_reward_model:
+            if FLAGS.use_gold_reward_model and not FLAGS.use_tpu:
                 gold_model.to(torch.device("cpu"))
 
             #### Run Trainer step
             stats = trainer.step(query_tensors, response_tensors, rewards)
-            stats = {}
   
             if total_iterations % FLAGS.eval_every_steps == 0:
-                if FLAGS.use_gold_reward_model:
+                if FLAGS.use_gold_reward_model and not FLAGS.use_tpu:
                     gold_model = trainer.accelerator.prepare_model(gold_model)
                     
                 #### Calculate rewards with train and eval datasets
                 for eval_name, eval_dataloader in all_eval_dataloaders.items():
                     print(f"Running evaluation on {eval_name}")
-                    batch, _, _, eval_rewards = process_batch(next(iter(eval_dataloader)))
-                    eval_rewards = torch.stack(eval_rewards, dim=0)
-                    eval_rewards = eval_rewards.cpu().numpy()
+                    batch = next(iter(eval_dataloader))
+                    all_rewards = []
+                    all_to_log = {}
+                    for i in range(FLAGS.num_eval_batches):
+                        sbatch = {k: batch[k][i*FLAGS.gold_shard_size:(i+1)*FLAGS.gold_shard_size] for k in batch}
+                        sbatch, query_tensors, response_tensors, eval_rewards = process_batch(sbatch)
+                        all_rewards.extend([x.cpu().numpy() for x in eval_rewards])
+                        for k in columns_to_log:
+                            all_to_log[k] = (all_to_log.get(k, []) + [x.cpu().numpy().item() if isinstance(x, torch.Tensor) else x for x in sbatch[k]])
+                        del sbatch, query_tensors, response_tensors, eval_rewards
+                        empty_cache()
+
+                    eval_rewards = np.array(all_rewards)
                     
                     # log reward stats
                     stats[f"{eval_name}/rewards"] = eval_rewards.mean()
@@ -509,15 +584,16 @@ def main(_):
                     stats[f"{eval_name}/rewards_median"] = np.median(eval_rewards)
 
                     # log table of completions
-                    table_rows = list(r for r in zip(*[batch[col] for col in columns_to_log], eval_rewards.tolist()))
+                    table_rows = list(r for r in zip(*[all_to_log[col] for col in columns_to_log], eval_rewards.tolist()))
                     stats[f"{eval_name}/table"] = wandb.Table(columns=[*columns_to_log, "reward"], rows=table_rows)
 
-                if FLAGS.use_gold_reward_model:
+                if FLAGS.use_gold_reward_model and not FLAGS.use_tpu:
                     gold_model = trainer.accelerator.prepare_model(gold_model)
                 
-                save_model(model_name + f"iteration_{total_iterations}", epoch)
+                # save_model(model_name + f"iteration_{total_iterations}", epoch)
             
             stats['epoch'] = epoch + sub_iteration/len(zipped_dataloaders)
+            total_iterations += 1
             trainer.log_stats(
                 stats=stats,
                 batch=output_batch,

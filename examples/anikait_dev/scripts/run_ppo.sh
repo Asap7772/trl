@@ -2,8 +2,8 @@ exp_num=0
 export HF_DATASETS_CACHE="/iris/u/asap7772/.cache"
 export PYTHONPATH=/iris/u/asap7772/trl:$PYTHONPATH
 
-mix_ratios=(0.0 0.5)
-wandb_project="ppo_rew_no_score_norm"
+mix_ratios=(0.0)
+wandb_project="12_27_ppo_rew_no_score_norm"
 dryrun=false
 debug=false
 which_exp=${1:--1}
@@ -22,8 +22,9 @@ for mix_ratio in "${mix_ratios[@]}"; do
     command="python /iris/u/asap7772/trl/examples/anikait_dev/ppo.py \
         --wandb_project $wandb_project \
         --run_name ppo_gold_rew_mixrat${mix_ratio} \
-        --use_gold_reward_model \
         --mixing_ratio ${mix_ratio} \
+        --use_score_scaling True \
+        --use_score_norm True \
     "
 
     if [[ $which_exp -lt 0 ]]; then
