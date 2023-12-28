@@ -22,6 +22,7 @@ from typing import Callable, List, Optional, Union
 import datasets
 import numpy as np
 import torch
+
 import torch.nn.functional as F
 from accelerate import Accelerator
 from accelerate.utils import ProjectConfiguration, is_deepspeed_available
@@ -503,7 +504,7 @@ class ReweightedBCTrainer(BaseTrainer):
 
             padded_inputs = self.tokenizer.pad(
                 inputs,
-                padding=True,
+                padding='max_length' if self.config.use_tpu else True,
                 max_length=None,
                 pad_to_multiple_of=pad_to_multiple_of,
                 return_tensors="pt",
@@ -605,7 +606,6 @@ class ReweightedBCTrainer(BaseTrainer):
             `dict[str, Any]`: A summary of the training statistics
         """
         bs = self.config.batch_size
-        breakpoint()
         queries, responses, scores, response_masks = self._step_safety_checker(
             bs, queries, responses, scores, response_masks
         )

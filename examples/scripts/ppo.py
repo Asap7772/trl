@@ -66,7 +66,7 @@ class ScriptArguments:
     trust_remote_code: bool = field(default=False, metadata={"help": "Enable `trust_remote_code`"})
 
 
-args = tyro.cli(ScriptArguments)
+args = ScriptArguments()
 
 
 # We then define the arguments to pass to the sentiment analysis pipeline.

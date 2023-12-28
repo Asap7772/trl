@@ -23,6 +23,8 @@ import tempfile
 from tqdm import tqdm
 import wandb
 import re
+from collections import defaultdict
+from functools import reduce
 
 FLAGS = flags.FLAGS
 flags.DEFINE_string('wandb_project', 'reweighted_bc', 'the wandb project name')
@@ -30,8 +32,8 @@ flags.DEFINE_string('run_name', 'reweighted_bc', 'the wandb run name')
 flags.DEFINE_string('output_dir', None, 'the output directory')
 flags.DEFINE_string('dataset_path', "tatsu-lab/alpaca_farm", 'the path to the dataset')
 flags.DEFINE_string('tokenizer_type', "EleutherAI/pythia-1.4b", 'the model name')
-flags.DEFINE_string('pretrained_dir', "/iris/u/asap7772/trl/output_checkpoints/checkpoint-7500", 'the path to the pretrained model')
-flags.DEFINE_string('reward_model', "/iris/u/asap7772/conservative_reward_model/data/exp_checkpoints/model_checkpoints_rewpref/rewpref_fixpad_labnoise_14m_1127/EleutherAI_pythia-14m_relabeled_alpacafarm_pythiasft_20K_preference_data_19000_0.0_1e-05_0.0/20231127-120834/epoch_5/", 'the path to the reward model')
+flags.DEFINE_string('pretrained_dir', "/home/anikaitsingh/asap7772/checkpoint-7500", 'the path to the pretrained model')
+flags.DEFINE_string('reward_model', "/home/anikaitsingh/mount-folder/data/exp_checkpoints/model_checkpoints_rewpref/rewpref_fixpad_labnoise_14m_1127/EleutherAI_pythia-14m_relabeled_alpacafarm_pythiasft_20K_preference_data_19000_0.0_1e-05_0.0/20231127-120834/epoch_5/", 'the path to the reward model')
 flags.DEFINE_float('learning_rate', 1.0e-6, 'the learning rate')
 flags.DEFINE_float('cosine_annealing_lr_eta_min', 1.0e-7, 'the cosine annealing eta min')
 flags.DEFINE_integer('num_train_epochs', 50, 'the number of training epochs')
@@ -61,18 +63,22 @@ flags.DEFINE_string('filter_type', 'threshold', 'the type of filtering to use')
 flags.DEFINE_float('filter_threshold', 0.0, 'the filter threshold')
 flags.DEFINE_integer('filter_topk', 3, 'the filter threshold')
 # flags for preference dataset
-flags.DEFINE_string('preference_dataset_path', '/iris/u/asap7772/conservative_reward_model/data/preference_datasets/relabeled_alpacafarm_pythiasft_20K_preference_data', 'the path to the preference dataset')
+flags.DEFINE_string('preference_dataset_path', 'tatsu-lab/alpaca_farm', 'the path to the preference dataset')
+flags.DEFINE_string("preference_dataset_subset", "alpaca_human_preference", "Dataset name")
+flags.DEFINE_string("preference_dataset_split", "preference", "Dataset name")
 flags.DEFINE_integer('preference_num_samples', 19000, 'the number of samples to use from the preference dataset')
 flags.DEFINE_bool("batched", True, "Whether to use batched processing")
 flags.DEFINE_integer("num_proc", 32, "Number of processes to use")
 flags.DEFINE_float('mixing_ratio', 0.5, 'the mixing ratio for preference dataset')
 # flags to setup gold reward model.
 flags.DEFINE_bool('use_gold_reward_model', False, 'whether to use gold reward model')
-flags.DEFINE_string('gold_reward_model_path', '/iris/u/asap7772/downloaded_models/reward-model-human', 'the path to the reward model')
+flags.DEFINE_string('gold_reward_model_path', '/home/anikaitsingh/asap7772/downloaded_models/reward-model-human', 'the path to the reward model')
 flags.DEFINE_integer('gold_shard_size', 8, 'the number of shards to use for gold reward model')
-flags.DEFINE_string('sft10k_path', '/iris/u/asap7772/downloaded_models/sft10k', 'the path to the sft10k model')
+flags.DEFINE_string('sft10k_path', '/home/anikaitsingh/asap7772/downloaded_models/sft10k', 'the path to the sft10k model')
 flags.DEFINE_bool('flash_attn', False, 'whether to use flash attention')
-flags.DEFINE_string('cache_dir', '/iris/u/asap7772/.cache', 'the cache directory')
+flags.DEFINE_string('cache_dir', '/nfs/iris_nfs/users/asap7772/.cache', 'the cache directory')
+# flags for tpu
+flags.DEFINE_bool('use_tpu', False, 'whether to use tpus')
 
 def get_dataset(path, num_samples=-1, return_test_data=True, num_samples_test=1000):
     assert os.path.exists(path)
@@ -142,7 +148,7 @@ def main(_):
     dataset = load_dataset(FLAGS.dataset_path, split="unlabeled")
     eval_dataset = load_dataset(FLAGS.dataset_path, split="val")
 
-    output_dir = FLAGS.output_dir or f"/iris/u/asap7772/trl/exp_checkpoints/{FLAGS.wandb_project}/{FLAGS.run_name}"
+    output_dir = FLAGS.output_dir or f"/home/anikaitsingh/asap7772/trl/exp_checkpoints/{FLAGS.wandb_project}/{FLAGS.run_name}"
     model_name = f"{FLAGS.wandb_project}_{FLAGS.run_name}"
     
     print('Output dir:', output_dir)
@@ -152,8 +158,39 @@ def main(_):
     batch_size_online_data = FLAGS.batch_size - batch_size_pref_data
     
     if FLAGS.preference_dataset_path == "tatsu-lab/alpaca_farm":
-        pref_dataset = load_dataset(FLAGS.preference_dataset_path, split="sft")
-        eval_pref_dataset = load_dataset(FLAGS.preference_dataset_path, split="preference")
+        pref_dataset = load_dataset(FLAGS.preference_dataset_path, FLAGS.preference_dataset_subset, split="preference")
+        pref_dataset = pref_dataset.train_test_split(test_size=0.1, seed=FLAGS.seed)
+        
+        PROMPT_TOKEN = '<|prompter|>'
+        ASSISTANT_TOKEN = '<|assistant|>'
+        EOS_TOKEN = '<|endoftext|>'
+        def process_dataset(batch):
+            new_batch = defaultdict(list)
+            for inst, inp, out1, out2, pref in zip(batch['instruction'], batch['input'], batch['output_1'], batch['output_2'], batch['preference']):
+                if pref == 1:
+                    selected = out1
+                    rejected = out2
+                else:
+                    selected = out2
+                    rejected = out1
+                if inp:
+                    text = f"{PROMPT_TOKEN}{inst}\n{inp}{EOS_TOKEN}{ASSISTANT_TOKEN}"
+                else:
+                    text = f"{PROMPT_TOKEN}{inst}{EOS_TOKEN}{ASSISTANT_TOKEN}"
+                
+                new_batch['prompt'].append(text)
+                new_batch['y_w'].append(f"{text}{selected}{EOS_TOKEN}")
+                new_batch['y_l'].append(f"{text}{rejected}{EOS_TOKEN}")
+            return new_batch
+        
+        pref_dataset = pref_dataset.map(
+            process_dataset,
+            batched=FLAGS.batched,
+            num_proc=FLAGS.num_proc,
+        )
+        
+        pref_dataset, eval_pref_dataset = pref_dataset['train'], pref_dataset['test']
+        remove_columns = ['instruction', 'input', 'output_1', 'output_2', 'preference', 'raw_preference', 'prompt', 'y_w', 'y_l']
     else:
         pref_dataset_name, pref_dataset = construct_dataset(
             path=FLAGS.preference_dataset_path,
@@ -162,15 +199,22 @@ def main(_):
         )
         print('Loaded dataset', pref_dataset_name)
         pref_dataset, eval_pref_dataset = pref_dataset['train'], pref_dataset['test']
-    
+        remove_columns = ['output', 'text', 'alpaca_text', 'y_ref', 'y_1', 'y_2', 'y_w', 'y_w_alpaca', 'y_l', 'y_l_alpaca', 'y_w_score', 'y_l_score', 'score_diff', 'prompt', 'alpaca_prompt']
+
+
     def process_dataset(batch):
         new_batch = {}
         new_batch['query'] = batch['prompt'] + batch['prompt']
         new_batch['text'] =  batch['y_w'] + batch['y_l']
         new_batch['response'] = [x.split(ASSISTANT_TOKEN)[-1] for x in batch['y_w'] + batch['y_l']]
+        
+        shapes = {}
+        for k, v in new_batch.items():
+            shapes[k] = len(v)
+        if reduce(lambda x,y: x if x==y else -1, list(shapes.values())) == -1:
+            assert False, f"Shapes of all columns must be equal, but got {shapes}, {list(shapes.values())}"
         return new_batch
 
-    remove_columns = ['output', 'text', 'alpaca_text', 'y_ref', 'y_1', 'y_2', 'y_w', 'y_w_alpaca', 'y_l', 'y_l_alpaca', 'y_w_score', 'y_l_score', 'score_diff', 'prompt', 'alpaca_prompt']
 
     pref_dataset = pref_dataset.map(
         process_dataset,
@@ -212,6 +256,7 @@ def main(_):
         filter_type=FLAGS.filter_type,
         filter_threshold=FLAGS.filter_threshold,
         filter_topk=FLAGS.filter_topk,
+        use_tpu=FLAGS.use_tpu,
         project_kwargs={
             'project_dir': output_dir,
         },
@@ -290,6 +335,8 @@ def main(_):
     
     def empty_cache():
         gc.collect()
+        if FLAGS.use_tpu:
+            return
         torch.cuda.empty_cache()
         gc.collect()
 
@@ -302,7 +349,7 @@ def main(_):
     @empty_cache_decorator
     @torch.no_grad()
     def get_pred_reward(text, max_len=512):
-        encoded_input = reward_tokenizer(text, padding=True, truncation=True, max_length=max_len, return_tensors='pt')
+        encoded_input = reward_tokenizer(text, padding='max_length' if FLAGS.use_tpu else True, truncation=True, max_length=max_len, return_tensors='pt')
         encoded_input = accelerate.utils.send_to_device(encoded_input, trainer.accelerator.device)
         output = reward_model(**encoded_input)
         logits = output.logits.squeeze()
@@ -315,7 +362,7 @@ def main(_):
         FLAGS.gold_reward_model_path,
         flash_attn=FLAGS.flash_attn,
         mixed_precision=True,
-        torch_dtype=torch.float16,
+        torch_dtype=torch.bfloat16 if FLAGS.use_tpu else torch.float32,
         cache_dir=FLAGS.cache_dir,
         low_cpu_mem_usage=True,
         config=RewardConfig(backbone_model_name_or_path=FLAGS.sft10k_path),
@@ -333,7 +380,8 @@ def main(_):
                     end = min(beg+shard_size, len(completions))
                     tokenized_completions = gold_tokenizer(
                         completions[beg:end],
-                        padding=True,
+                        padding='max_length' if FLAGS.use_tpu else True,
+                        max_length=None,
                         truncation=True,
                         return_tensors="pt",
                     )
@@ -348,7 +396,8 @@ def main(_):
         else:
             tokenized_completions = gold_tokenizer(
                 completions,
-                padding=True,
+                padding='max_length' if FLAGS.use_tpu else True,
+                max_length=None,
                 truncation=True,
                 return_tensors="pt",
             )
@@ -439,7 +488,7 @@ def main(_):
     def process_batch(batch):
         if batch is not None:
             #### Construct query tensors
-            query_tensors = tokenizer(batch["query"], padding=True, truncation=True, max_length=128, return_tensors='pt')
+            query_tensors = tokenizer(batch["query"], padding='max_length' if FLAGS.use_tpu else True, truncation=True, max_length=128, return_tensors='pt')
             query_tensors = accelerate.utils.send_to_device(query_tensors, trainer.accelerator.device)
 
             #### Get generations from SFTModel (including prompt)
@@ -455,7 +504,7 @@ def main(_):
 
             #### Update batch with response
             batch["response"] = [x.split(ASSISTANT_TOKEN)[-1] for x in texts]
-            response_tensors = tokenizer(batch["response"], padding=True, truncation=True, max_length=generation_kwargs['max_new_tokens'], return_tensors='pt').input_ids
+            response_tensors = tokenizer(batch["response"], padding='max_length' if FLAGS.use_tpu else True, truncation=True, max_length=generation_kwargs['max_new_tokens'], return_tensors='pt').input_ids
             response_tensors = [response_tensors[i] for i in range(0, len(response_tensors))]
 
             #### Compute reward score
@@ -473,10 +522,10 @@ def main(_):
     def process_pref_batch(pref_batch):
         if pref_batch is not None:
             ### Process preference dataset
-            pref_query = tokenizer(pref_batch["query"], padding=True, truncation=True, max_length=128, return_tensors='pt').input_ids
+            pref_query = tokenizer(pref_batch["query"], padding='max_length' if FLAGS.use_tpu else True, truncation=True, max_length=128, return_tensors='pt').input_ids
             pref_query_tensors = accelerate.utils.send_to_device(pref_query, trainer.accelerator.device)
             
-            pref_response_tensors = tokenizer(pref_batch["response"], padding=True, truncation=True, max_length=generation_kwargs['max_new_tokens'], return_tensors='pt').input_ids
+            pref_response_tensors = tokenizer(pref_batch["response"], padding='max_length' if FLAGS.use_tpu else True, truncation=True, max_length=generation_kwargs['max_new_tokens'], return_tensors='pt').input_ids
             pref_response_tensors = accelerate.utils.send_to_device(pref_response_tensors, trainer.accelerator.device)
             
             #### Compute reward score
@@ -520,14 +569,14 @@ def main(_):
                 output_batch[k] = (batch or {}).get(k, []) + (pref_batch or {}).get(k, [])
                 assert len(output_batch[k]) == des_len, f"len({k}) = {len(output_batch[k])} != {des_len}, {output_batch[k]}"
 
-            if FLAGS.use_gold_reward_model:
+            if FLAGS.use_gold_reward_model and not FLAGS.use_tpu:
                 gold_model.to(torch.device("cpu"))
 
             #### Run Trainer step
             stats = trainer.step(query_tensors, response_tensors, rewards)
   
             if total_iterations % FLAGS.eval_every_steps == 0:
-                if FLAGS.use_gold_reward_model:
+                if FLAGS.use_gold_reward_model and not FLAGS.use_tpu:
                     gold_model = trainer.accelerator.prepare_model(gold_model)
                     
                 #### Calculate rewards with train and eval datasets
@@ -559,7 +608,7 @@ def main(_):
                     table_rows = list(r for r in zip(*[all_to_log[col] for col in columns_to_log], eval_rewards.tolist()))
                     stats[f"{eval_name}/table"] = wandb.Table(columns=[*columns_to_log, "reward"], rows=table_rows)
 
-                if FLAGS.use_gold_reward_model:
+                if FLAGS.use_gold_reward_model and not FLAGS.use_tpu:
                     gold_model = trainer.accelerator.prepare_model(gold_model)
                 
                 # save_model(model_name + f"iteration_{total_iterations}", epoch)

@@ -142,6 +142,9 @@ class ReweightedBCConfig:
     """Value to use for filtering"""
     filter_topk: int = 3
     """Topk value to use for filtering"""
+    
+    # TPU specific parameters
+    use_tpu: bool = False
 
     # computed hyperparameters at runtime; we use `tyro.conf.Suppress` to hide them from the help text
     is_encoder_decoder: Optional[tyro.conf.Suppress[bool]] = None
