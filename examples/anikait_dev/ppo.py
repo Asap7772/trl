@@ -42,6 +42,7 @@ flags.DEFINE_integer('eval_every_steps', 10, 'how often to evaluate')
 flags.DEFINE_integer('num_eval_batches', 8, 'the number of evaluation batches of size gold shard size')
 flags.DEFINE_float('clip_range', 0.2, 'the clip range')
 flags.DEFINE_float('gae_lambda', 0.95, 'the GAE lambda')
+flags.DEFINE_float('vf_coef', 0.1, 'Scaling factor for value loss')
 flags.DEFINE_integer('batch_size', 256, 'the batch size')
 flags.DEFINE_integer('max_gen_batch_size', 16, 'the max generation batch size')
 flags.DEFINE_integer('mini_batch_size', 8, 'the chunk size')
@@ -67,6 +68,7 @@ flags.DEFINE_bool('flash_attn', False, 'whether to use flash attention')
 flags.DEFINE_string('cache_dir', '/nfs/iris_nfs/users/asap7772/.cache', 'the cache directory')
 # flags for tpu
 flags.DEFINE_bool('use_tpu', False, 'whether to use tpus')
+flags.DEFINE_float('target_kl', 6.0, 'whether to use tpus')
 
 def get_dataset(path, num_samples=-1, return_test_data=True, num_samples_test=1000):
     assert os.path.exists(path)
@@ -226,6 +228,7 @@ def main(_):
         learning_rate=FLAGS.learning_rate,
         reward_model=FLAGS.reward_model,
         lam=FLAGS.gae_lambda,
+        vf_coef=FLAGS.vf_coef,
         cliprange=FLAGS.clip_range,
         cliprange_value=FLAGS.clip_range,
         batch_size=FLAGS.batch_size,
@@ -235,7 +238,11 @@ def main(_):
         tracker_project_name=FLAGS.wandb_project,
         use_score_scaling=FLAGS.use_score_scaling,
         use_score_norm=FLAGS.use_score_norm,
+        score_clip=None,
         optimize_cuda_cache=True,
+        early_stopping=False,
+        target_kl=FLAGS.target_kl,
+        kl_penalty="kl",
         project_kwargs={
             'project_dir': output_dir,
         },

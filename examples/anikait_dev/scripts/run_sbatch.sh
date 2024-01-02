@@ -10,4 +10,4 @@
 #SBATCH --exclude=iris1,iris2,iris3,iris4,iris-hp-z8
 
 echo "Starting job $1 ..."
-bash /iris/u/asap7772/trl/examples/anikait_dev/run_reweighted_bc.sh $1
+bash /iris/u/asap7772/trl/examples/anikait_dev/scripts/run_ppo.sh $1
